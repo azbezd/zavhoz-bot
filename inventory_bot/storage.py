@@ -58,7 +58,7 @@ def seed_items_from_yaml(conn, repo_dir: str) -> int:
     existing = conn.execute("SELECT COUNT(*) AS c FROM items").fetchone()["c"]
     if existing:
         return 0
-    path = os.path.join(repo_dir, "inventory", "items.yaml")
+    path = os.path.join(repo_dir, "items.yaml")
     if not os.path.exists(path):
         return 0
     items = []

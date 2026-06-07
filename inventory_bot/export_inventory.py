@@ -85,12 +85,11 @@ def export_items(repo_dir: str) -> None:
             out.append("      null\n")
         out.append(f"    notes: {q(row['notes'])}\n\n")
 
-    inventory_dir = os.path.join(repo_dir, "inventory")
-    os.makedirs(inventory_dir, exist_ok=True)
-    with open(os.path.join(inventory_dir, "items.yaml"), "w", encoding="utf-8") as fh:
+    os.makedirs(repo_dir, exist_ok=True)
+    with open(os.path.join(repo_dir, "items.yaml"), "w", encoding="utf-8") as fh:
         fh.writelines(out)
 
-    with open(os.path.join(inventory_dir, "ai-context.md"), "w", encoding="utf-8") as fh:
+    with open(os.path.join(repo_dir, "ai-context.md"), "w", encoding="utf-8") as fh:
         fh.write("# AI Context: Hardware Inventory\n\n")
         fh.write("This folder is the source of truth for the user's electronics inventory.\n\n")
         fh.write("Use `items.yaml` for item counts, status, photos, manuals and project usage.\n")
@@ -105,7 +104,7 @@ def export_items(repo_dir: str) -> None:
 def maybe_git_sync(repo_dir: str, proposal_id: int) -> None:
     if os.environ.get("INVENTORY_AUTO_GIT", "0") != "1":
         return
-    subprocess.run(["git", "add", "inventory"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
     commit = subprocess.run(
         ["git", "commit", "-m", f"inventory: apply telegram proposal {proposal_id}"],
         cwd=repo_dir,

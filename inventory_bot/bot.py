@@ -113,7 +113,7 @@ def download_file(file_id: str, dest_dir: str) -> str:
     ext = os.path.splitext(file_path)[1] or ".jpg"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     local_name = f"telegram-{stamp}-{file_id[-8:]}{ext}"
-    repo_rel = os.path.join("inventory", "photos", local_name)
+    repo_rel = os.path.join("photos", local_name)
     repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
     abs_path = os.path.join(repo_dir, repo_rel)
     with urllib.request.urlopen(url, timeout=60) as resp, open(abs_path, "wb") as fh:
@@ -227,7 +227,7 @@ def handle_message(conn, message: dict) -> None:
         return
 
     repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
-    photo_dir = os.path.join(repo_dir, "inventory", "photos")
+    photo_dir = os.path.join(repo_dir, "photos")
     photo_paths = []
     if message.get("photo"):
         best = sorted(message["photo"], key=lambda item: item.get("file_size", 0))[-1]
