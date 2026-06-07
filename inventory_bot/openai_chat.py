@@ -1,0 +1,90 @@
+import json
+import os
+import urllib.error
+import urllib.request
+
+
+SYSTEM_PROMPT = """Ты Завхоз — умный Telegram-помощник для личного склада электроники.
+Говори по-русски, живо, коротко и по делу. Обращайся на "ты".
+Твоя задача: помогать вести инвентарь, понимать фото и текст, задавать уточняющие вопросы,
+предлагать аккуратные действия и объяснять, что лучше сделать дальше.
+
+Правила:
+- Не притворяйся, что уже изменил склад, если изменение требует /apply.
+- Если пользователь пишет, что купил/нашёл/использовал/потерял детали, скажи, что подготовишь предложение.
+- Если пользователь просит полный список склада, напомни про /list.
+- Если пользователь спрашивает проекты, напомни про /projects.
+- Если пользователь просто спрашивает совет, отвечай как технический помощник.
+- Если не уверен в детали по фото или маркировке, прямо скажи, что нужно уточнить.
+- Не раскрывай секреты и токены.
+- Не будь канцелярским ботом; говори естественно, но без лишней болтовни.
+"""
+
+
+def inventory_snapshot(conn, limit: int = 30) -> str:
+    rows = conn.execute(
+        """
+        SELECT id, name, category, status, available_qty, total_qty, unit, location
+        FROM items
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    if not rows:
+        return "Inventory DB is empty."
+    lines = []
+    for row in rows:
+        lines.append(
+            f"{row['id']}: {row['name']} | {row['category']} | {row['status']} | "
+            f"available {row['available_qty']:g}/{row['total_qty']:g} {row['unit']} | {row['location']}"
+        )
+    return "\n".join(lines)
+
+
+def chat_reply(conn, user_id: int, text: str, recent_messages, preferences: dict) -> str:
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return "OpenAI API key на сервере не настроен, поэтому пока отвечаю только служебными командами."
+
+    model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
+    pref_text = "\n".join(f"{k}: {v}" for k, v in preferences.items()) or "No saved preferences yet."
+    context = (
+        "Saved user preferences:\n"
+        + pref_text
+        + "\n\nRecent inventory snapshot:\n"
+        + inventory_snapshot(conn)
+    )
+
+    messages = [
+        {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
+        {"role": "system", "content": [{"type": "input_text", "text": context}]},
+    ]
+    for row in recent_messages:
+        role = "assistant" if row["role"] == "assistant" else "user"
+        messages.append({"role": role, "content": [{"type": "input_text", "text": row["text"]}]})
+    messages.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
+
+    payload = {"model": model, "input": messages}
+    base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    req = urllib.request.Request(
+        f"{base_url}/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"OpenAI HTTP {exc.code}: {body}") from exc
+
+    parts = []
+    for output in raw.get("output", []):
+        for part in output.get("content", []):
+            if part.get("type") == "output_text":
+                parts.append(part.get("text", ""))
+    if not parts and raw.get("output_text"):
+        parts.append(raw["output_text"])
+    return "\n".join(part for part in parts if part).strip() or "Я не смог сформулировать ответ. Попробуй ещё раз чуть конкретнее."

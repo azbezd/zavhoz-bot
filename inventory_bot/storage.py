@@ -1,0 +1,315 @@
+import json
+import os
+import sqlite3
+import re
+from datetime import datetime, timezone
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def connect() -> sqlite3.Connection:
+    db_path = os.environ.get("INVENTORY_DB", "inventory_bot/inventory.db")
+    os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    with open(os.path.join(os.path.dirname(__file__), "schema.sql"), "r", encoding="utf-8") as fh:
+        conn.executescript(fh.read())
+    return conn
+
+
+def _yaml_scalar(raw: str):
+    raw = raw.strip()
+    if raw in ("null", "None"):
+        return None
+    if raw.startswith('"') and raw.endswith('"'):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw[1:-1]
+    if raw.startswith("'") and raw.endswith("'"):
+        return raw[1:-1]
+    if re.fullmatch(r"-?\d+(\.\d+)?", raw):
+        return float(raw) if "." in raw else int(raw)
+    return raw
+
+
+def seed_projects(conn) -> None:
+    now = utc_now()
+    defaults = [
+        ("project-freenet", "FreeNet", "Pi Zero 2W / SIM7600 LTE-router and portal work tracked in the Git repository."),
+        ("project-freenetbox", "FreeNetBox", "Pi 5 based router boxes, portal, firmware and network appliance work tracked in Git."),
+        ("project-netbox", "NetBox", "Pi 3B+ based network box tracked in Git."),
+        ("project-ideas-lab", "Ideas Lab", "Temporary bucket for experiments that are not a named project yet."),
+    ]
+    for project_id, name, description in defaults:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO projects (id, name, description, status, notes, updated_at)
+            VALUES (?, ?, ?, 'active', '', ?)
+            """,
+            (project_id, name, description, now),
+        )
+    conn.commit()
+
+
+def seed_items_from_yaml(conn, repo_dir: str) -> int:
+    existing = conn.execute("SELECT COUNT(*) AS c FROM items").fetchone()["c"]
+    if existing:
+        return 0
+    path = os.path.join(repo_dir, "inventory", "items.yaml")
+    if not os.path.exists(path):
+        return 0
+    items = []
+    current = None
+    in_items = False
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            if line.strip() == "items:":
+                in_items = True
+                continue
+            if not in_items:
+                continue
+            if line.startswith("  - id:"):
+                if current:
+                    items.append(current)
+                current = {"id": _yaml_scalar(line.split(":", 1)[1])}
+                continue
+            if current is None:
+                continue
+            if line.startswith("    ") and not line.startswith("      ") and ":" in line:
+                key, value = line.strip().split(":", 1)
+                if key in {"name", "category", "status", "total_qty", "available_qty", "unit", "location", "notes"}:
+                    current[key] = _yaml_scalar(value)
+    if current:
+        items.append(current)
+    now = utc_now()
+    count = 0
+    for item in items:
+        if not item.get("id") or not item.get("name"):
+            continue
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO items (
+              id, name, category, status, total_qty, available_qty, unit,
+              location, notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item["id"],
+                item.get("name", ""),
+                item.get("category", "unknown"),
+                item.get("status", "stock"),
+                float(item.get("total_qty") or 0),
+                float(item.get("available_qty") or 0),
+                item.get("unit", "pcs"),
+                item.get("location", "unsorted"),
+                item.get("notes", ""),
+                now,
+                now,
+            ),
+        )
+        count += cur.rowcount
+    conn.commit()
+    return count
+
+
+def save_proposal(conn, user_id: int, chat_id: int, text: str, photo_paths: list[str], proposal: dict) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO proposals (
+          telegram_user_id, telegram_chat_id, message_text, photo_paths_json,
+          proposal_json, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
+        """,
+        (user_id, chat_id, text or "", json.dumps(photo_paths), json.dumps(proposal, ensure_ascii=False), utc_now()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_pending(conn):
+    return conn.execute(
+        "SELECT id, created_at, proposal_json FROM proposals WHERE status = 'pending' ORDER BY id DESC LIMIT 20"
+    ).fetchall()
+
+
+def list_items(conn, limit: int = 80):
+    return conn.execute(
+        """
+        SELECT id, name, category, status, available_qty, total_qty, unit, location
+        FROM items
+        ORDER BY category, name
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+
+def list_projects(conn):
+    return conn.execute("SELECT * FROM projects ORDER BY id").fetchall()
+
+
+def get_proposal(conn, proposal_id: int):
+    return conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
+
+
+def discard_proposal(conn, proposal_id: int) -> bool:
+    cur = conn.execute(
+        "UPDATE proposals SET status = 'discarded' WHERE id = ? AND status = 'pending'",
+        (proposal_id,),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def remember_chat(conn, user_id: int, role: str, text: str) -> None:
+    conn.execute(
+        "INSERT INTO chat_messages (telegram_user_id, role, text, created_at) VALUES (?, ?, ?, ?)",
+        (user_id, role, text or "", utc_now()),
+    )
+    conn.commit()
+
+
+def recent_chat(conn, user_id: int, limit: int = 12):
+    rows = conn.execute(
+        """
+        SELECT role, text
+        FROM chat_messages
+        WHERE telegram_user_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (user_id, limit),
+    ).fetchall()
+    return list(reversed(rows))
+
+
+def set_preference(conn, key: str, value: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO preferences (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """,
+        (key, value, utc_now()),
+    )
+    conn.commit()
+
+
+def get_preferences(conn) -> dict:
+    rows = conn.execute("SELECT key, value FROM preferences ORDER BY key").fetchall()
+    return {row["key"]: row["value"] for row in rows}
+
+
+def next_item_id(conn) -> str:
+    rows = conn.execute("SELECT id FROM items WHERE id LIKE 'hw-%'").fetchall()
+    max_num = 0
+    for row in rows:
+        tail = row["id"].split("-")[-1]
+        if tail.isdigit():
+            max_num = max(max_num, int(tail))
+    return f"hw-{datetime.now(timezone.utc).year}-{max_num + 1:03d}"
+
+
+def apply_proposal(conn, proposal_id: int) -> dict:
+    row = get_proposal(conn, proposal_id)
+    if not row or row["status"] != "pending":
+        raise ValueError("proposal is not pending")
+
+    proposal = json.loads(row["proposal_json"])
+    photo_paths = json.loads(row["photo_paths_json"])
+    applied = []
+    now = utc_now()
+
+    for op in proposal.get("operations", []):
+        op_name = op.get("op")
+        if op_name == "ask_user":
+            applied.append({"op": op_name, "result": "skipped"})
+            continue
+
+        item_id = op.get("item_id") or ""
+        name = op.get("name") or "Unnamed item"
+        qty = float(op.get("qty") or 0)
+        unit = op.get("unit") or "pcs"
+        location = op.get("location") or "unsorted"
+        category = op.get("category") or "unknown"
+        notes = op.get("notes") or ""
+        status = op.get("status") or "stock"
+        source_url = op.get("source_url") or ""
+        source_title = op.get("source_title") or ""
+        knowledge_summary = op.get("knowledge_summary") or ""
+
+        if op_name == "add_item":
+            if not item_id:
+                item_id = next_item_id(conn)
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO items (
+                  id, name, category, status, total_qty, available_qty, unit,
+                  location, notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (item_id, name, category, status, qty, qty if status != "ordered" else 0, unit, location, notes, now, now),
+            )
+            for path in photo_paths:
+                conn.execute("INSERT OR IGNORE INTO item_photos (item_id, path) VALUES (?, ?)", (item_id, path))
+            if source_url:
+                conn.execute(
+                    "INSERT OR IGNORE INTO item_sources (item_id, kind, title, url, notes) VALUES (?, 'purchase_or_reference', ?, ?, ?)",
+                    (item_id, source_title, source_url, op.get("source_notes") or ""),
+                )
+            if knowledge_summary:
+                conn.execute(
+                    """
+                    INSERT INTO item_knowledge (item_id, summary, specs_json, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(item_id) DO UPDATE SET summary = excluded.summary, specs_json = excluded.specs_json, updated_at = excluded.updated_at
+                    """,
+                    (item_id, knowledge_summary, json.dumps(op.get("specs") or {}, ensure_ascii=False), now),
+                )
+            applied.append({"op": op_name, "item_id": item_id})
+
+        elif op_name == "adjust_qty":
+            if not item_id:
+                raise ValueError("adjust_qty requires item_id")
+            conn.execute(
+                """
+                UPDATE items
+                SET total_qty = total_qty + ?,
+                    available_qty = available_qty + ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (qty, qty, now, item_id),
+            )
+            applied.append({"op": op_name, "item_id": item_id, "qty": qty})
+
+        elif op_name == "mark_used":
+            if not item_id:
+                raise ValueError("mark_used requires item_id")
+            project_id = op.get("project_id") or "project-ideas-lab"
+            conn.execute(
+                """
+                INSERT INTO item_usage (item_id, project_id, qty, role, since, removable)
+                VALUES (?, ?, ?, ?, ?, 1)
+                """,
+                (item_id, project_id, qty, notes, now[:10]),
+            )
+            conn.execute(
+                "UPDATE items SET available_qty = available_qty - ?, status = 'in_use', updated_at = ? WHERE id = ?",
+                (qty, now, item_id),
+            )
+            applied.append({"op": op_name, "item_id": item_id, "project_id": project_id, "qty": qty})
+
+        elif op_name == "add_photo":
+            if not item_id:
+                raise ValueError("add_photo requires item_id")
+            for path in photo_paths:
+                conn.execute("INSERT OR IGNORE INTO item_photos (item_id, path) VALUES (?, ?)", (item_id, path))
+            applied.append({"op": op_name, "item_id": item_id, "photos": len(photo_paths)})
+
+    conn.execute("UPDATE proposals SET status = 'applied', applied_at = ? WHERE id = ?", (now, proposal_id))
+    conn.commit()
+    return {"proposal_id": proposal_id, "applied": applied}

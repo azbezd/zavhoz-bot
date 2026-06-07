@@ -1,0 +1,19 @@
+[Unit]
+Description=FreeNet Inventory Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/freenet-inventory-bot.env
+WorkingDirectory=/opt/freenet-inventory-bot/FreeNet
+ExecStart=/usr/bin/python3 -m inventory_bot.bot
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/freenet-inventory-bot /opt/freenet-inventory-bot/FreeNet
+
+[Install]
+WantedBy=multi-user.target
