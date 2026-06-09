@@ -147,6 +147,29 @@ def list_items(conn, limit: int = 80):
     ).fetchall()
 
 
+def list_items_with_sources(conn, limit: int = 200):
+    """Items with the first source URL (preferring kind='purchase')."""
+    return conn.execute(
+        """
+        SELECT
+            i.id, i.name, i.category, i.status, i.available_qty, i.total_qty,
+            i.unit, i.location,
+            (SELECT s.url FROM item_sources s
+             WHERE s.item_id = i.id
+             ORDER BY CASE s.kind WHEN 'purchase' THEN 0 ELSE 1 END, s.id
+             LIMIT 1) AS source_url,
+            (SELECT s.title FROM item_sources s
+             WHERE s.item_id = i.id
+             ORDER BY CASE s.kind WHEN 'purchase' THEN 0 ELSE 1 END, s.id
+             LIMIT 1) AS source_title
+        FROM items i
+        ORDER BY i.category, i.name
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+
 def list_projects(conn):
     return conn.execute("SELECT * FROM projects ORDER BY id").fetchall()
 

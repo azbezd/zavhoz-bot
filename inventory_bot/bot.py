@@ -35,6 +35,7 @@ try:
         get_preferences,
         get_proposal,
         list_items,
+        list_items_with_sources,
         list_pending,
         list_projects,
         recent_chat,
@@ -55,6 +56,7 @@ except ImportError:
         get_preferences,
         get_proposal,
         list_items,
+        list_items_with_sources,
         list_pending,
         list_projects,
         recent_chat,
@@ -93,8 +95,65 @@ def telegram(method: str, payload: dict | None = None, timeout: int = 30) -> dic
     return body
 
 
-def send(chat_id: int, text: str) -> None:
-    telegram("sendMessage", {"chat_id": chat_id, "text": text[:3900]})
+def send(chat_id: int, text: str, parse_mode: str | None = None, disable_web_page_preview: bool = True) -> None:
+    payload = {"chat_id": chat_id, "text": text[:3900]}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    if disable_web_page_preview:
+        payload["disable_web_page_preview"] = "true"
+    telegram("sendMessage", payload)
+
+
+def send_html(chat_id: int, text: str) -> None:
+    """Send a long HTML-formatted message, splitting on category boundaries
+    (double newlines) if it doesn't fit in 3900 bytes."""
+    chunks = []
+    buf = ""
+    for block in text.split("\n\n"):
+        candidate = (buf + "\n\n" + block) if buf else block
+        if len(candidate.encode("utf-8")) > 3900:
+            if buf:
+                chunks.append(buf)
+            buf = block
+        else:
+            buf = candidate
+    if buf:
+        chunks.append(buf)
+    for chunk in chunks:
+        send(chat_id, chunk, parse_mode="HTML")
+
+
+def html_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+CATEGORY_LABELS = {
+    "computer": "🖥 Компьютеры и платформы",
+    "microcontroller": "🧠 Микроконтроллеры",
+    "module": "📦 Модули",
+    "sensor": "📡 Сенсоры",
+    "emitter": "💡 Излучатели (LED, дисплеи)",
+    "semiconductor": "⚡️ Полупроводники",
+    "passive": "🔘 Пассивные (резисторы, конденсаторы)",
+    "connector": "🔌 Разъёмы",
+    "wire": "🪢 Провода",
+    "proto": "🟫 Платы прототипирования",
+    "mechanical": "🔩 Механика",
+    "tool": "🛠 Инструменты",
+}
+
+
+STATUS_LABELS = {
+    "stock": "в наличии",
+    "ordered": "ожидаю",
+    "reserved": "зарезервировано",
+    "in_use": "в проекте",
+    "consumable": "расходник",
+    "tool": "инструмент",
+    "wishlist": "хочу купить",
+    "lost": "потеряно",
+    "retired": "списано",
+}
 
 
 def send_chat_action(chat_id: int, action: str = "typing") -> None:
@@ -213,17 +272,46 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
             lines.append(f"#{row['id']} {row['created_at']} — {proposal.get('summary', '')}")
         send(chat_id, "\n".join(lines))
     elif cmd == "/list":
-        rows = list_items(conn)
+        try:
+            rows = list_items_with_sources(conn)
+        except Exception:
+            rows = list_items(conn)
         if not rows:
             send(chat_id, "Склад пока пустой.")
             return
-        lines = ["Склад:"]
+        # Группировка по category в порядке появления в CATEGORY_LABELS, потом всё остальное
+        groups: dict[str, list] = {}
         for row in rows:
-            lines.append(
-                f"{row['id']} | {row['name']} | {row['status']} | "
-                f"{row['available_qty']:g}/{row['total_qty']:g} {row['unit']} | {row['location']}"
-            )
-        send(chat_id, "\n".join(lines))
+            groups.setdefault(row["category"] or "other", []).append(row)
+        order = [c for c in CATEGORY_LABELS if c in groups] + [c for c in groups if c not in CATEGORY_LABELS]
+
+        out = ["<b>📋 Склад</b>", f"<i>Всего позиций: {len(rows)}</i>", ""]
+        for cat in order:
+            items = groups[cat]
+            label = CATEGORY_LABELS.get(cat, html_escape(cat))
+            out.append(f"<b>{label}</b> · {len(items)}")
+            for row in items:
+                name = html_escape(row["name"])
+                src_url = row["source_url"] if "source_url" in row.keys() else None
+                if src_url:
+                    name_part = f'<a href="{html_escape(src_url)}">{name}</a>'
+                else:
+                    name_part = name
+                qty = row["available_qty"]
+                total = row["total_qty"]
+                unit = row["unit"] or "шт"
+                if qty == total:
+                    qty_part = f"{qty:g} {html_escape(unit)}"
+                else:
+                    qty_part = f"{qty:g}/{total:g} {html_escape(unit)}"
+                status_text = STATUS_LABELS.get(row["status"], row["status"])
+                status_part = f"<i>{html_escape(status_text)}</i>" if status_text else ""
+                line_bits = [f"• {name_part} — {qty_part}"]
+                if status_part:
+                    line_bits.append(f"({status_part})")
+                out.append(" ".join(line_bits))
+            out.append("")
+        send_html(chat_id, "\n".join(out).strip())
     elif cmd == "/projects":
         rows = list_projects(conn)
         if not rows:
