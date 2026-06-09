@@ -61,8 +61,10 @@ def chat_reply(conn, user_id: int, text: str, recent_messages, preferences: dict
         {"role": "system", "content": [{"type": "input_text", "text": context}]},
     ]
     for row in recent_messages:
-        role = "assistant" if row["role"] == "assistant" else "user"
-        messages.append({"role": role, "content": [{"type": "input_text", "text": row["text"]}]})
+        if row["role"] == "assistant":
+            messages.append({"role": "assistant", "content": [{"type": "output_text", "text": row["text"]}]})
+        else:
+            messages.append({"role": "user", "content": [{"type": "input_text", "text": row["text"]}]})
     messages.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
 
     payload = {"model": model, "input": messages}
