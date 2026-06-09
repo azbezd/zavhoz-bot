@@ -1097,6 +1097,11 @@ def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
     if not item:
         return False
 
+    # Висит вопрос «Да/Нет»? Текст вместо кнопки = «нет, поясняю» — прошлое
+    # понимание сбрасываем и разбираем новое пояснение.
+    if inv_get_pending(conn, user_id):
+        inv_clear_pending(conn, user_id)
+
     if awaiting_id and sess["await_kind"] == "cat":
         cat = text.strip().lower()
         item_set_category(conn, awaiting_id, cat)
