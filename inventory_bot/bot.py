@@ -237,8 +237,10 @@ def handle_message(conn, message: dict) -> None:
         send(chat_id, "Кинь текст или фото с подписью, что это и что с этим сделать.")
         return
 
+    print(f"step: remember user msg", flush=True)
     remember_chat(conn, user_id, "user", text or "[photo]")
     if looks_like_inventory_update(text, bool(photo_paths)):
+        print(f"step: route=inventory", flush=True)
         send(chat_id, "Понял, похоже на изменение склада. Сейчас соберу черновик, ничего сам не запишу без подтверждения.")
         try:
             proposal = extract_inventory_proposal(text, [os.path.join(repo_dir, path) for path in photo_paths])
@@ -250,19 +252,26 @@ def handle_message(conn, message: dict) -> None:
                 f"Причина: {exc}\n\n"
                 "Фото/текст можно разобрать позже, когда настроим AI-доступ с поддерживаемого региона."
             )
+        print(f"step: inventory reply ready len={len(reply)}", flush=True)
         remember_chat(conn, user_id, "assistant", reply)
         send(chat_id, reply)
+        print(f"step: inventory sent", flush=True)
     else:
+        print(f"step: route=chat, calling openai", flush=True)
         try:
             reply = chat_reply(conn, user_id, text, recent_chat(conn, user_id), get_preferences(conn))
+            print(f"step: chat_reply ok len={len(reply)}", flush=True)
         except Exception as exc:
+            print(f"step: chat_reply FAILED: {type(exc).__name__}: {exc}", flush=True)
             reply = (
                 "Я вижу сообщение, но AI-ответ сейчас не сработал.\n"
                 f"Причина: {exc}\n\n"
                 "Складовые команды без AI работают: /list, /projects, /pending."
             )
         remember_chat(conn, user_id, "assistant", reply)
+        print(f"step: sending reply", flush=True)
         send(chat_id, reply)
+        print(f"step: reply sent ok", flush=True)
 
 
 def main() -> None:
