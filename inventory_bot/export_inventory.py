@@ -104,12 +104,12 @@ def export_items(repo_dir: str) -> None:
         fh.write("- If a project needs a part and `available_qty` is 0, ask before repurposing.\n")
 
 
-def maybe_git_sync(repo_dir: str, proposal_id: int) -> None:
+def maybe_git_sync(repo_dir: str, message: str) -> None:
     if os.environ.get("INVENTORY_AUTO_GIT", "0") != "1":
         return
     subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
     commit = subprocess.run(
-        ["git", "commit", "-m", f"inventory: apply telegram proposal {proposal_id}"],
+        ["git", "commit", "-m", f"inventory: {message}"],
         cwd=repo_dir,
         text=True,
         capture_output=True,

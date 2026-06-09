@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import socket
 import time
 import urllib.parse
@@ -26,14 +27,37 @@ socket.getaddrinfo = _ipv6_first_getaddrinfo
 
 try:
     from .export_inventory import export_items, maybe_git_sync
-    from .openai_chat import chat_reply, chat_reply_stream
+    from .openai_chat import chat_reply, chat_reply_stream, classify_inv_intent
     from .openai_extract import extract_inventory_proposal
     from .storage import (
         apply_proposal,
         connect,
         discard_proposal,
+        get_item,
         get_preferences,
         get_proposal,
+        inv_clear_await,
+        inv_events_for,
+        inv_finish,
+        inv_get,
+        inv_increment_seen,
+        inv_log_event,
+        inv_mark_lost,
+        inv_mark_present,
+        inv_mark_qty,
+        inv_next_item,
+        inv_progress,
+        inv_set_await,
+        inv_set_current,
+        inv_set_pass,
+        inv_set_prompt_message,
+        inv_set_skipped,
+        inv_skipped,
+        inv_start,
+        item_add_photo,
+        item_append_note,
+        item_first_photo,
+        item_first_source,
         list_items,
         list_items_with_sources,
         list_pending,
@@ -47,7 +71,7 @@ try:
     )
 except ImportError:
     from export_inventory import export_items, maybe_git_sync
-    from openai_chat import chat_reply, chat_reply_stream
+    from openai_chat import chat_reply, chat_reply_stream, classify_inv_intent
     from openai_extract import extract_inventory_proposal
     from storage import (
         apply_proposal,
@@ -57,16 +81,25 @@ except ImportError:
         get_preferences,
         get_proposal,
         inv_clear_await,
+        inv_events_for,
         inv_finish,
         inv_get,
         inv_increment_seen,
+        inv_log_event,
         inv_mark_lost,
         inv_mark_present,
         inv_mark_qty,
         inv_next_item,
+        inv_progress,
         inv_set_await,
+        inv_set_current,
+        inv_set_pass,
         inv_set_prompt_message,
+        inv_set_skipped,
+        inv_skipped,
         inv_start,
+        item_add_photo,
+        item_append_note,
         item_first_photo,
         item_first_source,
         list_items,
@@ -325,7 +358,14 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
             "Пиши обычным языком: «купил 10 резисторов 220 Ом», «это ушло в FreeNetBox», "
             "«что у меня есть для ESP32?». Если я собираюсь менять склад, сначала дам черновик, "
             "а ты подтвердишь через /apply.\n\n"
-            "Команды: /list, /projects, /pending, /show <id>, /apply <id>, /discard <id>, /export."
+            "Команды:\n"
+            "/list — склад по категориям\n"
+            "/inv — инвентаризация (продолжает, если уже идёт)\n"
+            "/skipped — вернуться к пропущенным позициям\n"
+            "/stop_inv — завершить инвентаризацию со сводкой\n"
+            "/projects — проекты\n"
+            "/pending — черновики изменений\n"
+            "/export — экспорт склада в Git"
         )
         send(chat_id, msg)
         remember_chat(conn, user_id, "assistant", msg)
@@ -396,7 +436,7 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
     elif cmd == "/apply" and len(parts) == 2:
         result = apply_proposal(conn, int(parts[1]))
         export_items(repo_dir)
-        maybe_git_sync(repo_dir, int(parts[1]))
+        maybe_git_sync(repo_dir, f"apply telegram proposal {int(parts[1])}")
         send(chat_id, "Готово, внёс в склад и экспортировал файлы:\n" + json.dumps(result, ensure_ascii=False, indent=2))
     elif cmd == "/export":
         export_items(repo_dir)
@@ -406,11 +446,33 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
         set_preference(conn, "style", value)
         send(chat_id, f"Запомнил стиль общения: {value}")
     elif cmd in ("/inv", "/inventory"):
-        inv_start(conn, user_id, chat_id)
-        send(chat_id, "Начинаю инвентаризацию. Иду от самых дорогих к самым дешёвым. "
-                       "Нажми кнопку под каждой позицией; /stop_inv в любой момент.")
-        if not _inv_show_current(conn, chat_id, user_id):
-            _inv_finish_with_summary(conn, chat_id, user_id)
+        sess = inv_get(conn, user_id)
+        if sess:
+            done, total_count = inv_progress(conn, user_id)
+            kb = {"inline_keyboard": [[
+                {"text": f"▶️ Продолжить ({total_count - done} осталось)", "callback_data": "inv:resume:_"},
+                {"text": "🔄 Начать заново", "callback_data": "inv:restart:_"},
+            ]]}
+            send_with_keyboard(chat_id, f"Инвентаризация уже идёт: проверено {done} из {total_count}.", kb)
+        else:
+            inv_start(conn, user_id, chat_id)
+            send(chat_id, "Начинаю инвентаризацию: иду от самых дорогих к самым дешёвым.\n\n"
+                          "Можно жать кнопки или отвечать словами: «да», «нет», «осталось 2», "
+                          "«есть, но не считал», «потом». Любой другой текст станет заметкой к позиции, "
+                          "фото — прикрепится к ней.")
+            _inv_advance(conn, chat_id, user_id)
+    elif cmd == "/skipped":
+        sess = inv_get(conn, user_id)
+        if not sess:
+            send(chat_id, "Сессии инвентаризации нет. Начать — /inv.")
+        else:
+            skipped = inv_skipped(conn, user_id)
+            if not skipped:
+                send(chat_id, "Пропущенных позиций нет.")
+            else:
+                inv_set_pass(conn, user_id, 2)
+                send(chat_id, f"Возвращаюсь к пропущенным ({len(skipped)}).")
+                _inv_advance(conn, chat_id, user_id)
     elif cmd in ("/stop_inv", "/inv_stop"):
         if inv_get(conn, user_id):
             _inv_finish_with_summary(conn, chat_id, user_id)
@@ -476,46 +538,65 @@ def _chat_with_stream(conn, chat_id: int, user_id: int, text: str) -> str:
     return reply
 
 
-def _inv_keyboard(item_id: str) -> dict:
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "✅ Всё на месте", "callback_data": f"inv:ok:{item_id}"},
-                {"text": "🟡 Меньше", "callback_data": f"inv:less:{item_id}"},
-            ],
-            [
-                {"text": "❌ Потерял", "callback_data": f"inv:lost:{item_id}"},
-                {"text": "⏭ Пропустить", "callback_data": f"inv:skip:{item_id}"},
-            ],
-            [
-                {"text": "⏹ Закончить", "callback_data": "inv:stop:_"},
-            ],
-        ]
-    }
+UNIT_LABELS = {"pcs": "шт", "m": "м", "meters": "м", "mm": "мм", "cm": "см", "g": "г", "kg": "кг"}
+
+
+def _unit_ru(unit: str) -> str:
+    return UNIT_LABELS.get((unit or "pcs").lower(), unit or "шт")
+
+
+def _inv_keyboard(item_id: str, skipped_count: int = 0, pass_no: int = 1) -> dict:
+    rows = [
+        [
+            {"text": "✅ На месте", "callback_data": f"inv:ok:{item_id}"},
+            {"text": "✏️ Кол-во", "callback_data": f"inv:qty:{item_id}"},
+        ],
+        [
+            {"text": "📦 Есть, не считал", "callback_data": f"inv:uncnt:{item_id}"},
+            {"text": "❌ Потерял", "callback_data": f"inv:lost:{item_id}"},
+        ],
+    ]
+    skip_row = [{"text": "⏭ Пропустить", "callback_data": f"inv:skip:{item_id}"}]
+    if pass_no == 1 and skipped_count:
+        skip_row.append({"text": f"↩️ Пропущенные ({skipped_count})", "callback_data": "inv:retskip:_"})
+    rows.append(skip_row)
+    rows.append([
+        {"text": "⏸ Потом", "callback_data": "inv:pause:_"},
+        {"text": "⏹ Завершить", "callback_data": "inv:stop:_"},
+    ])
+    return {"inline_keyboard": rows}
 
 
 def _inv_show_current(conn, chat_id: int, user_id: int) -> bool:
-    """Pick next item and send it. Returns False if nothing left."""
+    """Pick next item and send it. Returns False if nothing left in the current pass."""
     item = inv_next_item(conn, user_id)
     if not item:
         return False
+    sess = inv_get(conn, user_id)
+    pass_no = sess["pass_no"] if sess else 1
+    skipped = inv_skipped(conn, user_id)
+    done, total_count = inv_progress(conn, user_id)
     name = html_escape(item["name"])
     cat = CATEGORY_LABELS.get(item["category"], html_escape(item["category"] or "—"))
     qty = item["available_qty"]
     total = item["total_qty"]
-    unit = html_escape(item["unit"] or "шт")
+    unit = html_escape(_unit_ru(item["unit"]))
     price = item["price_rub"] or 0
     src_title, src_url = item_first_source(conn, item["id"])
     src_part = f'\n🔗 <a href="{html_escape(src_url)}">{html_escape(src_title or "источник")}</a>' if src_url else ""
     qty_part = f"{qty:g} {unit}" if qty == total else f"{qty:g}/{total:g} {unit}"
+    progress = f"📋 {done + 1} из {total_count}"
+    if pass_no >= 2:
+        progress += "  ·  ↩️ второй круг"
     caption = (
+        f"{progress}\n"
         f"<b>{name}</b>\n"
         f"{cat}  ·  по базе: <b>{qty_part}</b>"
         + (f"  ·  {price:g} ₽" if price else "")
         + src_part
     )
     photo = item_first_photo(conn, item["id"])
-    kb = _inv_keyboard(item["id"])
+    kb = _inv_keyboard(item["id"], skipped_count=len(skipped), pass_no=pass_no)
     if photo:
         msg_id = send_photo(chat_id, photo, caption, reply_markup=kb)
         if msg_id is None:
@@ -524,14 +605,70 @@ def _inv_show_current(conn, chat_id: int, user_id: int) -> bool:
         msg_id = send_with_keyboard(chat_id, caption, kb)
     if msg_id:
         inv_set_prompt_message(conn, user_id, msg_id)
+    inv_set_current(conn, user_id, item["id"])
     return True
+
+
+def _inv_advance(conn, chat_id: int, user_id: int) -> None:
+    """Show the next card; switch to the skipped round when the main one ends;
+    finish with a summary when nothing is left."""
+    if _inv_show_current(conn, chat_id, user_id):
+        return
+    sess = inv_get(conn, user_id)
+    if sess and sess["pass_no"] == 1:
+        skipped = inv_skipped(conn, user_id)
+        if skipped:
+            inv_set_pass(conn, user_id, 2)
+            send(chat_id, f"Основной круг пройден. Возвращаюсь к пропущенным ({len(skipped)}).")
+            if _inv_show_current(conn, chat_id, user_id):
+                return
+    _inv_finish_with_summary(conn, chat_id, user_id)
 
 
 def _inv_finish_with_summary(conn, chat_id: int, user_id: int) -> None:
     sess = inv_get(conn, user_id)
-    seen = sess["seen"] if sess else 0
+    if not sess:
+        send(chat_id, "Сессии инвентаризации нет.")
+        return
+    events = inv_events_for(conn, user_id)
+    done, total_count = inv_progress(conn, user_id)
+    ok_count = sum(1 for e in events if e["action"] == "ok")
+    uncounted = [e for e in events if e["action"] == "uncounted"]
+    qty_changes = [e for e in events if e["action"] == "qty"]
+    lost = [e for e in events if e["action"] == "lost"]
+    unchecked = max(0, total_count - done)
+
+    lines = [f"<b>Итог инвентаризации</b>  ·  проверено {done} из {total_count}"]
+    if ok_count:
+        lines.append(f"✅ Подтверждено: {ok_count}")
+    if uncounted:
+        lines.append(f"📦 Есть, без пересчёта: {len(uncounted)}")
+    if qty_changes:
+        lines.append("✏️ Изменено количество:")
+        for e in qty_changes:
+            old = f"{e['old_total']:g}" if e["old_total"] is not None else "?"
+            new = f"{e['new_total']:g}" if e["new_total"] is not None else "?"
+            lines.append(f"  • {html_escape(e['item_name'])}: {old} → {new}")
+    if lost:
+        lines.append("❌ Потеряно:")
+        for e in lost:
+            lines.append(f"  • {html_escape(e['item_name'])}")
+    if unchecked:
+        lines.append(f"⏭ Не проверено: {unchecked} — всплывут при следующем /inv")
     inv_finish(conn, user_id)
-    send(chat_id, f"Закончил инвентаризацию. Проверено позиций: {seen}.")
+
+    synced = ""
+    if qty_changes or lost:
+        repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
+        try:
+            export_items(repo_dir)
+            maybe_git_sync(repo_dir, "inventory check via telegram /inv")
+            if os.environ.get("INVENTORY_AUTO_GIT", "0") == "1":
+                synced = "\n\n💾 Изменения выгружены в GitHub."
+        except Exception as exc:
+            print(f"inv export/sync error: {exc}", flush=True)
+            synced = f"\n\n⚠️ Экспорт в GitHub не прошёл: {exc}"
+    send_html(chat_id, "\n".join(lines) + synced)
 
 
 def handle_callback_query(conn, callback: dict) -> None:
@@ -571,35 +708,222 @@ def handle_callback_query(conn, callback: dict) -> None:
         edit_reply_markup(chat_id, int(msg_id), None)
 
     if action == "stop":
-        answer_callback(cb_id, "Остановил")
+        answer_callback(cb_id, "Завершаю")
         _inv_finish_with_summary(conn, chat_id, user_id)
         return
+    if action == "pause":
+        answer_callback(cb_id, "Пауза")
+        done, total_count = inv_progress(conn, user_id)
+        send(chat_id, f"Поставил на паузу: проверено {done} из {total_count}. Продолжить — /inv.")
+        return
+    if action == "resume":
+        answer_callback(cb_id, "Продолжаю")
+        _inv_advance(conn, chat_id, user_id)
+        return
+    if action == "restart":
+        answer_callback(cb_id, "Начинаю заново")
+        inv_start(conn, user_id, chat_id)
+        _inv_advance(conn, chat_id, user_id)
+        return
+    if action == "retskip":
+        skipped = inv_skipped(conn, user_id)
+        if not skipped:
+            answer_callback(cb_id, "Пропущенных нет")
+            _inv_advance(conn, chat_id, user_id)
+            return
+        answer_callback(cb_id, "К пропущенным")
+        inv_set_pass(conn, user_id, 2)
+        send(chat_id, f"Возвращаюсь к пропущенным ({len(skipped)}).")
+        _inv_advance(conn, chat_id, user_id)
+        return
+    if action == "qcancel":
+        inv_clear_await(conn, user_id)
+        answer_callback(cb_id, "Отменил")
+        _inv_advance(conn, chat_id, user_id)
+        return
 
-    if action == "ok" and item_id:
+    item = get_item(conn, item_id) if item_id else None
+    if action == "ok" and item:
         inv_mark_present(conn, item_id)
         inv_increment_seen(conn, user_id)
+        inv_log_event(conn, user_id, item_id, item["name"], "ok")
         answer_callback(cb_id, "Отмечено: всё на месте")
-    elif action == "lost" and item_id:
+    elif action == "lost" and item:
+        inv_log_event(conn, user_id, item_id, item["name"], "lost", old_total=item["total_qty"])
         inv_mark_lost(conn, item_id)
         inv_increment_seen(conn, user_id)
-        answer_callback(cb_id, "Отмечено: потерял")
-    elif action == "skip" and item_id:
-        # Skip: считаем «проверено» этой сессией чтобы не выскакивало снова, но qty не трогаем.
+        answer_callback(cb_id, "Отмечено: потеряно")
+    elif action == "uncnt" and item:
         inv_mark_present(conn, item_id)
+        inv_clear_await(conn, user_id)
         inv_increment_seen(conn, user_id)
-        answer_callback(cb_id, "Пропустил")
-    elif action == "less" and item_id:
+        inv_log_event(conn, user_id, item_id, item["name"], "uncounted")
+        answer_callback(cb_id, "Есть, без пересчёта")
+    elif action == "skip" and item:
+        if sess["pass_no"] >= 2:
+            # Второй пропуск: оставляем непроверенной, выпадет в следующей инвентаризации.
+            skipped = [sid for sid in inv_skipped(conn, user_id) if sid != item_id]
+            inv_set_skipped(conn, user_id, skipped)
+            answer_callback(cb_id, "Оставил непроверенной")
+        else:
+            skipped = inv_skipped(conn, user_id)
+            if item_id not in skipped:
+                skipped.append(item_id)
+            inv_set_skipped(conn, user_id, skipped)
+            answer_callback(cb_id, "Отложил на потом")
+    elif action in ("qty", "less") and item:
         inv_set_await(conn, user_id, item_id)
         answer_callback(cb_id, "Жду число")
-        send(chat_id, "Сколько штук осталось? Напиши число.")
+        unit = _unit_ru(item["unit"])
+        kb = {"inline_keyboard": [[
+            {"text": "📦 Есть, не считал", "callback_data": f"inv:uncnt:{item_id}"},
+            {"text": "↩️ Отмена", "callback_data": "inv:qcancel:_"},
+        ]]}
+        send_with_keyboard(
+            chat_id,
+            f"Сколько по факту? Сейчас по базе {item['total_qty']:g} {unit}. "
+            f"Напиши число (можно с точкой, например 2.5).",
+            kb,
+        )
         return
     else:
         answer_callback(cb_id)
         return
 
-    # Дальше — следующая позиция или финал
-    if not _inv_show_current(conn, chat_id, user_id):
+    # Дальше — следующая позиция, второй круг или финал
+    _inv_advance(conn, chat_id, user_id)
+
+
+_NUM_RE = re.compile(
+    r"^(\d+(?:[.,]\d+)?)\s*(шт|штук|штуки|штука|м|метр|метра|метров|мм|см|г|кг|pcs|m)?\.?$",
+    re.IGNORECASE,
+)
+
+_INV_RULES = {
+    "ok": {"да", "ок", "ok", "есть", "на месте", "всё на месте", "все на месте", "всё ок",
+           "все ок", "+", "есть всё", "есть все", "всё есть", "все есть"},
+    "lost": {"нет", "нету", "потерял", "потеряно", "не нашёл", "не нашел", "нигде нет"},
+    "skip": {"пропусти", "пропустить", "потом", "дальше", "скип", "следующая", "следующий"},
+    "stop": {"стоп", "хватит", "закончи", "закончить", "завершить", "завершай", "конец"},
+    "pause": {"пауза", "перерыв", "продолжим позже", "продолжу позже"},
+    "uncounted": {"не считал", "не считала", "есть но не считал", "есть, но не считал",
+                  "не знаю сколько", "хз сколько", "не знаю"},
+}
+
+
+def _parse_qty(text: str):
+    m = _NUM_RE.match(text.strip().lower())
+    return float(m.group(1).replace(",", ".")) if m else None
+
+
+def _rule_intent(text: str):
+    t = text.strip().lower().rstrip("!.…)")
+    for action, phrases in _INV_RULES.items():
+        if t in phrases:
+            return action
+    return None
+
+
+def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
+                      qty=None, note: str | None = None) -> None:
+    """Apply a verification outcome expressed in free text to the current card."""
+    item_id = item["id"]
+    name = item["name"]
+    if note:
+        item_append_note(conn, item_id, note)
+    noted = " Заметку записал." if note else ""
+
+    if action == "ok":
+        inv_mark_present(conn, item_id)
+        inv_clear_await(conn, user_id)
+        inv_increment_seen(conn, user_id)
+        inv_log_event(conn, user_id, item_id, name, "ok")
+        send(chat_id, f"✅ {name} — на месте.{noted}")
+        _inv_advance(conn, chat_id, user_id)
+    elif action == "lost":
+        inv_log_event(conn, user_id, item_id, name, "lost", old_total=item["total_qty"])
+        inv_mark_lost(conn, item_id)
+        inv_clear_await(conn, user_id)
+        inv_increment_seen(conn, user_id)
+        send(chat_id, f"❌ {name} — отметил потерянной.{noted}")
+        _inv_advance(conn, chat_id, user_id)
+    elif action == "uncounted":
+        inv_mark_present(conn, item_id)
+        inv_clear_await(conn, user_id)
+        inv_increment_seen(conn, user_id)
+        inv_log_event(conn, user_id, item_id, name, "uncounted")
+        send(chat_id, f"📦 {name} — есть, без точного пересчёта.{noted}")
+        _inv_advance(conn, chat_id, user_id)
+    elif action == "qty" and qty is not None:
+        old_total = item["total_qty"]
+        inv_mark_qty(conn, item_id, qty)
+        inv_clear_await(conn, user_id)
+        inv_increment_seen(conn, user_id)
+        inv_log_event(conn, user_id, item_id, name, "qty", old_total=old_total, new_total=qty)
+        unit = _unit_ru(item["unit"])
+        send(chat_id, f"✏️ {name}: записал {qty:g} {unit} (было {old_total:g}).{noted}")
+        _inv_advance(conn, chat_id, user_id)
+    elif action == "skip":
+        sess = inv_get(conn, user_id)
+        inv_clear_await(conn, user_id)
+        if sess and sess["pass_no"] >= 2:
+            skipped = [sid for sid in inv_skipped(conn, user_id) if sid != item_id]
+            inv_set_skipped(conn, user_id, skipped)
+            send(chat_id, f"⏭ {name} — оставил непроверенной.{noted}")
+        else:
+            skipped = inv_skipped(conn, user_id)
+            if item_id not in skipped:
+                skipped.append(item_id)
+            inv_set_skipped(conn, user_id, skipped)
+            send(chat_id, f"⏭ {name} — отложил, вернёмся в конце или по /skipped.{noted}")
+        _inv_advance(conn, chat_id, user_id)
+    elif action == "stop":
         _inv_finish_with_summary(conn, chat_id, user_id)
+    elif action == "pause":
+        done, total_count = inv_progress(conn, user_id)
+        send(chat_id, f"Поставил на паузу: проверено {done} из {total_count}. Продолжить — /inv.")
+    elif action == "note":
+        send(chat_id, f"📝 Записал заметку к «{name}». Карточка ждёт ответа.")
+    else:
+        send(chat_id, "Не понял. Нажми кнопку под карточкой или напиши число/«есть»/«нет».")
+
+
+def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
+    """Free-form reply during an inventory session. Returns True if consumed."""
+    awaiting_id = sess["await_qty_for"]
+    current_id = awaiting_id or sess["current_item_id"]
+    item = get_item(conn, current_id) if current_id else None
+    if not item:
+        return False
+
+    qty = _parse_qty(text)
+    if qty is not None:
+        _inv_apply_action(conn, chat_id, user_id, item, "qty", qty=qty)
+        return True
+    action = _rule_intent(text)
+    if action:
+        _inv_apply_action(conn, chat_id, user_id, item, action)
+        return True
+
+    try:
+        intent = classify_inv_intent(item["name"], _unit_ru(item["unit"]), f"{item['total_qty']:g}", text)
+    except Exception as exc:
+        print(f"inv intent error: {type(exc).__name__}: {exc}", flush=True)
+        if awaiting_id:
+            send(chat_id, "Нужно число, например 2 или 2.5. Или кнопки «Есть, не считал» / «Отмена».")
+            return True
+        return False  # пусть ответит обычный чат
+
+    if intent["action"] == "chat":
+        return False
+    if intent["action"] == "qty" and intent["qty"] is None:
+        send(chat_id, "Понял, что речь о количестве, но число не разобрал. Напиши цифрой.")
+        return True
+    if intent["action"] == "note":
+        _inv_apply_action(conn, chat_id, user_id, item, "note", note=intent["note"] or text)
+        return True
+    _inv_apply_action(conn, chat_id, user_id, item, intent["action"], qty=intent["qty"], note=intent["note"])
+    return True
 
 
 def handle_message(conn, message: dict) -> None:
@@ -618,22 +942,28 @@ def handle_message(conn, message: dict) -> None:
 
     text = message.get("text") or message.get("caption") or ""
 
-    # Inventory mode: if waiting on a number, consume the message as that number.
+    # Inventory mode: free-form replies, numbers and photos apply to the current card.
     sess = inv_get(conn, user_id)
-    if sess and sess["await_qty_for"] and text and not text.startswith("/"):
-        item_id = sess["await_qty_for"]
-        digits = "".join(ch for ch in text if ch.isdigit())
-        if digits:
-            new_total = float(digits)
-            inv_mark_qty(conn, item_id, new_total)
-            inv_clear_await(conn, user_id)
-            inv_increment_seen(conn, user_id)
-            send(chat_id, f"Записал: осталось {new_total:g}.")
-            if not _inv_show_current(conn, chat_id, user_id):
-                _inv_finish_with_summary(conn, chat_id, user_id)
-        else:
-            send(chat_id, "Нужно число, например 5. Или нажми «⏹ Закончить» под позицией.")
-        return
+    if sess and text and not text.startswith("/") and not message.get("photo"):
+        if _handle_inv_text(conn, chat_id, user_id, sess, text):
+            return
+    if sess and message.get("photo"):
+        current_id = sess["await_qty_for"] or sess["current_item_id"]
+        item = get_item(conn, current_id) if current_id else None
+        if item:
+            repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
+            best = sorted(message["photo"], key=lambda p: p.get("file_size", 0))[-1]
+            try:
+                rel = download_file(best["file_id"], os.path.join(repo_dir, "photos"))
+                item_add_photo(conn, item["id"], rel)
+                if text:
+                    item_append_note(conn, item["id"], text)
+                send(chat_id, f"📷 Прикрепил фото к «{item['name']}»."
+                              + (" Заметку записал." if text else "")
+                              + " Карточка ждёт ответа.")
+            except Exception as exc:
+                send(chat_id, f"Фото не сохранилось: {exc}")
+            return
 
     if text.startswith("/"):
         handle_command(conn, chat_id, user_id, text)
@@ -677,6 +1007,25 @@ def handle_message(conn, message: dict) -> None:
         print(f"step: chat done len={len(reply)}", flush=True)
 
 
+def set_my_commands() -> None:
+    """Register the command menu so Telegram shows hints instead of manual typing."""
+    commands = [
+        {"command": "list", "description": "📋 Склад по категориям"},
+        {"command": "inv", "description": "🔍 Инвентаризация (старт/продолжить)"},
+        {"command": "skipped", "description": "↩️ К пропущенным позициям"},
+        {"command": "stop_inv", "description": "⏹ Завершить инвентаризацию"},
+        {"command": "projects", "description": "🛠 Проекты"},
+        {"command": "pending", "description": "📝 Черновики изменений"},
+        {"command": "export", "description": "💾 Экспорт склада в Git"},
+        {"command": "start", "description": "ℹ️ Что умеет бот"},
+    ]
+    try:
+        telegram("setMyCommands", {"commands": json.dumps(commands, ensure_ascii=False)})
+        print("setMyCommands ok", flush=True)
+    except Exception as exc:
+        print(f"setMyCommands error: {exc}", flush=True)
+
+
 def main() -> None:
     conn = connect()
     repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
@@ -684,6 +1033,7 @@ def main() -> None:
     imported = seed_items_from_yaml(conn, repo_dir)
     if imported:
         print(f"seeded inventory from yaml changes={imported}", flush=True)
+    set_my_commands()
     offset = 0
     send_errors = 0
     allowed = ",".join(str(item) for item in sorted(allowed_user_ids())) or "none"

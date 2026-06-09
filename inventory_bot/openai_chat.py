@@ -109,6 +109,72 @@ def chat_reply(conn, user_id: int, text: str, recent_messages, preferences: dict
     return "\n".join(part for part in parts if part).strip() or "Я не смог сформулировать ответ. Попробуй ещё раз чуть конкретнее."
 
 
+INV_INTENT_PROMPT = """Ты разбираешь ответ пользователя во время инвентаризации склада электроники.
+Пользователю показана позиция, он отвечает свободным текстом. Определи намерение.
+
+Верни СТРОГО один JSON-объект без пояснений:
+{"action": "...", "qty": число или null, "note": "строка или null"}
+
+Допустимые action:
+- "ok" — подтверждает: всё на месте, количество совпадает ("да", "есть", "всё ок", "на месте")
+- "lost" — позиции нет, потерял ("нет", "не нашёл", "потерял")
+- "qty" — называет количество/длину; положи число в qty ("осталось 2", "примерно 3 метра", "штуки четыре")
+- "uncounted" — позиция есть, но точно посчитать/измерить не может ("есть, но не считал", "не знаю сколько", "размеры не определить")
+- "skip" — отложить позицию на потом ("пропусти", "потом", "дальше")
+- "stop" — завершить инвентаризацию ("стоп", "хватит", "закончим")
+- "pause" — прервать сейчас, продолжить позже ("пауза", "продолжим позже")
+- "note" — комментарий/заметка о позиции, положи краткую заметку в note ("лежит в синей коробке", "один разъём погнут")
+- "chat" — вопрос или реплика НЕ про учёт этой позиции (например "а для чего этот модуль?")
+
+Если в тексте и подтверждение, и заметка ("всё ок, лежат в ящике 3") — action="ok", note=заметка.
+Если число с уточнением ("2, но один сломан") — action="qty", qty=2, note="один сломан".
+"""
+
+
+def classify_inv_intent(item_name: str, unit: str, current_qty: str, text: str) -> dict:
+    """One cheap non-streaming call. Returns dict with action/qty/note.
+    Raises on transport/parse errors; caller falls back to rule-based parsing."""
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("no OPENAI_API_KEY")
+    model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
+    context = f"Позиция: {item_name}\nЕдиница учёта: {unit}\nПо базе сейчас: {current_qty}\nОтвет пользователя: {text}"
+    payload = {
+        "model": model,
+        "input": [
+            {"role": "system", "content": [{"type": "input_text", "text": INV_INTENT_PROMPT}]},
+            {"role": "user", "content": [{"type": "input_text", "text": context}]},
+        ],
+    }
+    base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    req = urllib.request.Request(
+        f"{base_url}/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = json.loads(resp.read().decode("utf-8"))
+    parts = []
+    for output in raw.get("output", []):
+        for part in output.get("content", []):
+            if part.get("type") == "output_text":
+                parts.append(part.get("text", ""))
+    answer = "\n".join(parts).strip()
+    start, end = answer.find("{"), answer.rfind("}")
+    if start == -1 or end == -1:
+        raise RuntimeError(f"no JSON in intent answer: {answer[:120]!r}")
+    data = json.loads(answer[start:end + 1])
+    action = str(data.get("action", "")).lower()
+    if action not in ("ok", "lost", "qty", "uncounted", "skip", "stop", "pause", "note", "chat"):
+        raise RuntimeError(f"bad intent action: {action!r}")
+    qty = data.get("qty")
+    qty = float(qty) if isinstance(qty, (int, float)) else None
+    note = data.get("note")
+    note = str(note).strip() if note else None
+    return {"action": action, "qty": qty, "note": note}
+
+
 def chat_reply_stream(conn, user_id: int, text: str, recent_messages, preferences: dict):
     """Stream OpenAI Responses API. Yields incremental text deltas. The caller
     accumulates them. Raises RuntimeError on HTTP error before the stream opens.

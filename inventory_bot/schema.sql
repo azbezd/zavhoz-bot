@@ -25,7 +25,21 @@ CREATE TABLE IF NOT EXISTS inv_sessions (
   last_action_at TEXT NOT NULL,
   seen INTEGER NOT NULL DEFAULT 0,
   await_qty_for TEXT NOT NULL DEFAULT '',
-  last_prompt_message_id INTEGER NOT NULL DEFAULT 0
+  last_prompt_message_id INTEGER NOT NULL DEFAULT 0,
+  pass_no INTEGER NOT NULL DEFAULT 1,
+  skipped_json TEXT NOT NULL DEFAULT '[]',
+  current_item_id TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS inv_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  item_id TEXT NOT NULL,
+  item_name TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL,
+  old_total REAL,
+  new_total REAL,
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS item_tags (

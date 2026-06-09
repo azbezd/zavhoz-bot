@@ -16,7 +16,25 @@ def connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     with open(os.path.join(os.path.dirname(__file__), "schema.sql"), "r", encoding="utf-8") as fh:
         conn.executescript(fh.read())
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn) -> None:
+    """Add columns missing from tables created by older schema versions."""
+    wanted = {
+        "inv_sessions": [
+            ("pass_no", "INTEGER NOT NULL DEFAULT 1"),
+            ("skipped_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("current_item_id", "TEXT NOT NULL DEFAULT ''"),
+        ],
+    }
+    for table, columns in wanted.items():
+        have = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in columns:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    conn.commit()
 
 
 def _yaml_scalar(raw: str):
@@ -172,12 +190,14 @@ def item_first_source(conn, item_id: str):
 def inv_start(conn, user_id: int, chat_id: int) -> None:
     now = utc_now()
     conn.execute(
-        "INSERT INTO inv_sessions (user_id, chat_id, started_at, last_action_at, seen, await_qty_for, last_prompt_message_id) "
-        "VALUES (?, ?, ?, ?, 0, '', 0) "
+        "INSERT INTO inv_sessions (user_id, chat_id, started_at, last_action_at, seen, await_qty_for, last_prompt_message_id, pass_no, skipped_json, current_item_id) "
+        "VALUES (?, ?, ?, ?, 0, '', 0, 1, '[]', '') "
         "ON CONFLICT(user_id) DO UPDATE SET chat_id = excluded.chat_id, started_at = excluded.started_at, "
-        "last_action_at = excluded.last_action_at, seen = 0, await_qty_for = '', last_prompt_message_id = 0",
+        "last_action_at = excluded.last_action_at, seen = 0, await_qty_for = '', last_prompt_message_id = 0, "
+        "pass_no = 1, skipped_json = '[]', current_item_id = ''",
         (user_id, chat_id, now, now),
     )
+    conn.execute("DELETE FROM inv_events WHERE user_id = ?", (user_id,))
     conn.commit()
 
 
@@ -222,23 +242,103 @@ def inv_finish(conn, user_id: int) -> None:
     conn.commit()
 
 
+def inv_skipped(conn, user_id: int) -> list:
+    sess = inv_get(conn, user_id)
+    if not sess:
+        return []
+    try:
+        return json.loads(sess["skipped_json"] or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def inv_set_skipped(conn, user_id: int, item_ids: list) -> None:
+    conn.execute(
+        "UPDATE inv_sessions SET skipped_json = ?, last_action_at = ? WHERE user_id = ?",
+        (json.dumps(item_ids), utc_now(), user_id),
+    )
+    conn.commit()
+
+
+def inv_set_pass(conn, user_id: int, pass_no: int) -> None:
+    conn.execute(
+        "UPDATE inv_sessions SET pass_no = ?, last_action_at = ? WHERE user_id = ?",
+        (pass_no, utc_now(), user_id),
+    )
+    conn.commit()
+
+
+def inv_set_current(conn, user_id: int, item_id: str) -> None:
+    conn.execute(
+        "UPDATE inv_sessions SET current_item_id = ?, last_action_at = ? WHERE user_id = ?",
+        (item_id, utc_now(), user_id),
+    )
+    conn.commit()
+
+
 def inv_next_item(conn, user_id: int):
-    """Pick the next item to verify: not verified during this session, highest price first."""
+    """Pick the next item to verify this session, highest price first.
+
+    Pass 1 walks everything except skipped items; pass 2 walks only skipped.
+    """
     sess = inv_get(conn, user_id)
     if not sess:
         return None
     started = sess["started_at"]
+    skipped = inv_skipped(conn, user_id)
+    placeholders = ",".join("?" for _ in skipped) or "''"
+    if sess["pass_no"] >= 2:
+        if not skipped:
+            return None
+        clause = f"AND id IN ({placeholders})"
+    else:
+        clause = f"AND id NOT IN ({placeholders})" if skipped else ""
     return conn.execute(
-        """
-        SELECT id, name, category, status, total_qty, available_qty, unit, location, price_rub, description, last_verified_at
+        f"""
+        SELECT id, name, category, status, total_qty, available_qty, unit, location, price_rub, description, last_verified_at, notes
         FROM items
         WHERE status NOT IN ('retired', 'wishlist')
           AND (last_verified_at IS NULL OR last_verified_at = '' OR last_verified_at < ?)
+          {clause}
         ORDER BY price_rub DESC, name ASC
         LIMIT 1
         """,
+        (started, *skipped),
+    ).fetchone()
+
+
+def inv_progress(conn, user_id: int) -> tuple:
+    """(verified this session, total eligible)."""
+    sess = inv_get(conn, user_id)
+    if not sess:
+        return (0, 0)
+    started = sess["started_at"]
+    row = conn.execute(
+        """
+        SELECT
+          SUM(CASE WHEN last_verified_at >= ? THEN 1 ELSE 0 END) AS done,
+          COUNT(*) AS total
+        FROM items WHERE status NOT IN ('retired', 'wishlist')
+        """,
         (started,),
     ).fetchone()
+    return (row["done"] or 0, row["total"] or 0)
+
+
+def inv_log_event(conn, user_id: int, item_id: str, item_name: str, action: str,
+                  old_total=None, new_total=None) -> None:
+    conn.execute(
+        "INSERT INTO inv_events (user_id, item_id, item_name, action, old_total, new_total, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (user_id, item_id, item_name, action, old_total, new_total, utc_now()),
+    )
+    conn.commit()
+
+
+def inv_events_for(conn, user_id: int):
+    return conn.execute(
+        "SELECT * FROM inv_events WHERE user_id = ? ORDER BY id", (user_id,)
+    ).fetchall()
 
 
 def inv_mark_present(conn, item_id: str) -> None:
@@ -250,11 +350,34 @@ def inv_mark_present(conn, item_id: str) -> None:
 
 
 def inv_mark_qty(conn, item_id: str, new_total: float) -> None:
-    """Set total to new_total, available_qty min'd to new_total to keep invariant."""
+    """Set total to new_total keeping the reserved (in-project) part intact."""
+    row = conn.execute("SELECT total_qty, available_qty FROM items WHERE id = ?", (item_id,)).fetchone()
+    reserved = max(0.0, (row["total_qty"] or 0) - (row["available_qty"] or 0)) if row else 0.0
+    new_available = max(0.0, new_total - reserved)
     conn.execute(
-        "UPDATE items SET total_qty = ?, available_qty = MIN(available_qty, ?), "
+        "UPDATE items SET total_qty = ?, available_qty = ?, "
         "last_verified_at = ?, updated_at = ? WHERE id = ?",
-        (new_total, new_total, utc_now(), utc_now(), item_id),
+        (new_total, new_available, utc_now(), utc_now(), item_id),
+    )
+    conn.commit()
+
+
+def item_append_note(conn, item_id: str, text: str) -> None:
+    row = conn.execute("SELECT notes FROM items WHERE id = ?", (item_id,)).fetchone()
+    old = (row["notes"] or "").strip() if row else ""
+    stamp = utc_now()[:10]
+    new = (old + "\n" if old else "") + f"[{stamp}] {text.strip()}"
+    conn.execute(
+        "UPDATE items SET notes = ?, updated_at = ? WHERE id = ?",
+        (new, utc_now(), item_id),
+    )
+    conn.commit()
+
+
+def item_add_photo(conn, item_id: str, path: str) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO item_photos (item_id, path) VALUES (?, ?)",
+        (item_id, path),
     )
     conn.commit()
 
