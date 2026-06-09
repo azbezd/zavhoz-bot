@@ -113,10 +113,13 @@ INV_INTENT_PROMPT = """Ты разбираешь ответ пользовате
 Пользователю показана позиция, он отвечает свободным текстом. Определи намерение.
 
 Верни СТРОГО один JSON-объект без пояснений:
-{"action": "...", "qty": число или null, "note": "строка или null"}
+{"action": "...", "qty": число или null, "note": "строка или null", "project": "строка или null"}
 
 Допустимые action:
-- "ok" — подтверждает: всё на месте, количество совпадает ("да", "есть", "всё ок", "на месте")
+- "ok" — подтверждает: позиция на месте, свободна ("да", "есть", "всё ок", "на месте")
+- "in_project" — позиция есть, но стоит/используется в проекте; положи название проекта в project,
+  ТОЧНО как в списке известных проектов ("используется во FreeNet", "стоит в NetBox").
+  Если проект не назван или не из списка — project=null.
 - "lost" — позиции нет, потерял ("нет", "не нашёл", "потерял")
 - "qty" — называет количество/длину; положи число в qty ("осталось 2", "примерно 3 метра", "штуки четыре")
 - "uncounted" — позиция есть, но точно посчитать/измерить не может ("есть, но не считал", "не знаю сколько", "размеры не определить")
@@ -131,14 +134,19 @@ INV_INTENT_PROMPT = """Ты разбираешь ответ пользовате
 """
 
 
-def classify_inv_intent(item_name: str, unit: str, current_qty: str, text: str) -> dict:
-    """One cheap non-streaming call. Returns dict with action/qty/note.
+def classify_inv_intent(item_name: str, unit: str, current_qty: str, text: str,
+                        projects: list | None = None) -> dict:
+    """One cheap non-streaming call. Returns dict with action/qty/note/project.
     Raises on transport/parse errors; caller falls back to rule-based parsing."""
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         raise RuntimeError("no OPENAI_API_KEY")
     model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
-    context = f"Позиция: {item_name}\nЕдиница учёта: {unit}\nПо базе сейчас: {current_qty}\nОтвет пользователя: {text}"
+    projects_line = ", ".join(projects) if projects else "нет"
+    context = (
+        f"Позиция: {item_name}\nЕдиница учёта: {unit}\nПо базе сейчас: {current_qty}\n"
+        f"Известные проекты: {projects_line}\nОтвет пользователя: {text}"
+    )
     payload = {
         "model": model,
         "input": [
@@ -166,13 +174,15 @@ def classify_inv_intent(item_name: str, unit: str, current_qty: str, text: str) 
         raise RuntimeError(f"no JSON in intent answer: {answer[:120]!r}")
     data = json.loads(answer[start:end + 1])
     action = str(data.get("action", "")).lower()
-    if action not in ("ok", "lost", "qty", "uncounted", "skip", "stop", "pause", "note", "chat"):
+    if action not in ("ok", "in_project", "lost", "qty", "uncounted", "skip", "stop", "pause", "note", "chat"):
         raise RuntimeError(f"bad intent action: {action!r}")
     qty = data.get("qty")
     qty = float(qty) if isinstance(qty, (int, float)) else None
     note = data.get("note")
     note = str(note).strip() if note else None
-    return {"action": action, "qty": qty, "note": note}
+    project = data.get("project")
+    project = str(project).strip() if project else None
+    return {"action": action, "qty": qty, "note": note, "project": project}
 
 
 def chat_reply_stream(conn, user_id: int, text: str, recent_messages, preferences: dict):

@@ -59,6 +59,7 @@ def seed_projects(conn) -> None:
         ("project-freenet", "FreeNet", "Pi Zero 2W / SIM7600 LTE-router and portal work tracked in the Git repository."),
         ("project-freenetbox", "FreeNetBox", "Pi 5 based router boxes, portal, firmware and network appliance work tracked in Git."),
         ("project-netbox", "NetBox", "Pi 3B+ based network box tracked in Git."),
+        ("project-dachanetbox", "DachaNetBox", "Pi based router box installed at the dacha."),
         ("project-ideas-lab", "Ideas Lab", "Temporary bucket for experiments that are not a named project yet."),
     ]
     for project_id, name, description in defaults:
@@ -370,6 +371,29 @@ def item_append_note(conn, item_id: str, text: str) -> None:
     conn.execute(
         "UPDATE items SET notes = ?, updated_at = ? WHERE id = ?",
         (new, utc_now(), item_id),
+    )
+    conn.commit()
+
+
+def get_project(conn, project_id: str):
+    return conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+
+
+def item_set_in_project(conn, item_id: str, project_id: str) -> None:
+    """Mark the whole position as living inside a project: usage record,
+    status in_use, no free stock, verified now."""
+    now = utc_now()
+    row = conn.execute("SELECT total_qty FROM items WHERE id = ?", (item_id,)).fetchone()
+    qty = row["total_qty"] if row else 1
+    conn.execute("DELETE FROM item_usage WHERE item_id = ? AND project_id = ?", (item_id, project_id))
+    conn.execute(
+        "INSERT INTO item_usage (item_id, project_id, qty, role, since, removable) "
+        "VALUES (?, ?, ?, '', ?, 1)",
+        (item_id, project_id, qty, now[:10]),
+    )
+    conn.execute(
+        "UPDATE items SET status = 'in_use', available_qty = 0, last_verified_at = ?, updated_at = ? WHERE id = ?",
+        (now, now, item_id),
     )
     conn.commit()
 

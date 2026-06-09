@@ -35,6 +35,7 @@ try:
         discard_proposal,
         get_item,
         get_preferences,
+        get_project,
         get_proposal,
         inv_clear_await,
         inv_events_for,
@@ -56,6 +57,7 @@ try:
         inv_start,
         item_add_photo,
         item_append_note,
+        item_set_in_project,
         item_first_photo,
         item_first_source,
         list_items,
@@ -79,6 +81,7 @@ except ImportError:
         discard_proposal,
         get_item,
         get_preferences,
+        get_project,
         get_proposal,
         inv_clear_await,
         inv_events_for,
@@ -100,6 +103,7 @@ except ImportError:
         inv_start,
         item_add_photo,
         item_append_note,
+        item_set_in_project,
         item_first_photo,
         item_first_source,
         list_items,
@@ -548,23 +552,45 @@ def _unit_ru(unit: str) -> str:
 def _inv_keyboard(item_id: str, skipped_count: int = 0, pass_no: int = 1) -> dict:
     rows = [
         [
-            {"text": "✅ На месте", "callback_data": f"inv:ok:{item_id}"},
+            {"text": "✅ Свободно", "callback_data": f"inv:ok:{item_id}"},
             {"text": "✏️ Кол-во", "callback_data": f"inv:qty:{item_id}"},
         ],
         [
-            {"text": "📦 Есть, не считал", "callback_data": f"inv:uncnt:{item_id}"},
-            {"text": "❌ Потерял", "callback_data": f"inv:lost:{item_id}"},
+            {"text": "🔧 В проекте", "callback_data": f"inv:proj:{item_id}"},
+            {"text": "⏭ Пропустить", "callback_data": f"inv:skip:{item_id}"},
         ],
     ]
-    skip_row = [{"text": "⏭ Пропустить", "callback_data": f"inv:skip:{item_id}"}]
+    last_row = [{"text": "⏹ Завершить", "callback_data": "inv:stop:_"}]
     if pass_no == 1 and skipped_count:
-        skip_row.append({"text": f"↩️ Пропущенные ({skipped_count})", "callback_data": "inv:retskip:_"})
-    rows.append(skip_row)
-    rows.append([
-        {"text": "⏸ Потом", "callback_data": "inv:pause:_"},
-        {"text": "⏹ Завершить", "callback_data": "inv:stop:_"},
-    ])
+        last_row.append({"text": f"↩️ Пропущенные ({skipped_count})", "callback_data": "inv:retskip:_"})
+    rows.append(last_row)
     return {"inline_keyboard": rows}
+
+
+def _inv_show_project_picker(conn, chat_id: int, item) -> None:
+    rows, row = [], []
+    for proj in list_projects(conn):
+        row.append({"text": proj["name"], "callback_data": f"inv:pset:{item['id']}:{proj['id']}"})
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([{"text": "↩️ Отмена", "callback_data": "inv:pcancel:_"}])
+    send_with_keyboard(chat_id, f"Где используется «{html_escape(item['name'])}»?", {"inline_keyboard": rows})
+
+
+def _resolve_project(conn, text: str):
+    """Match free-form project mention to a project row; None if ambiguous/unknown."""
+    needle = (text or "").strip().lower()
+    if not needle:
+        return None
+    projects = list_projects(conn)
+    exact = [p for p in projects if p["name"].lower() == needle]
+    if len(exact) == 1:
+        return exact[0]
+    partial = [p for p in projects if needle in p["name"].lower() or p["name"].lower() in needle]
+    return partial[0] if len(partial) == 1 else None
 
 
 def _inv_show_current(conn, chat_id: int, user_id: int) -> bool:
@@ -636,11 +662,16 @@ def _inv_finish_with_summary(conn, chat_id: int, user_id: int) -> None:
     uncounted = [e for e in events if e["action"] == "uncounted"]
     qty_changes = [e for e in events if e["action"] == "qty"]
     lost = [e for e in events if e["action"] == "lost"]
+    in_projects = [e for e in events if e["action"] == "project"]
     unchecked = max(0, total_count - done)
 
     lines = [f"<b>Итог инвентаризации</b>  ·  проверено {done} из {total_count}"]
     if ok_count:
         lines.append(f"✅ Подтверждено: {ok_count}")
+    if in_projects:
+        lines.append("🔧 В проектах:")
+        for e in in_projects:
+            lines.append(f"  • {html_escape(e['item_name'])}")
     if uncounted:
         lines.append(f"📦 Есть, без пересчёта: {len(uncounted)}")
     if qty_changes:
@@ -658,7 +689,7 @@ def _inv_finish_with_summary(conn, chat_id: int, user_id: int) -> None:
     inv_finish(conn, user_id)
 
     synced = ""
-    if qty_changes or lost:
+    if qty_changes or lost or in_projects:
         repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
         try:
             export_items(repo_dir)
@@ -741,8 +772,30 @@ def handle_callback_query(conn, callback: dict) -> None:
         answer_callback(cb_id, "Отменил")
         _inv_advance(conn, chat_id, user_id)
         return
+    if action == "pcancel":
+        answer_callback(cb_id, "Отменил")
+        _inv_advance(conn, chat_id, user_id)
+        return
+    if action == "pset" and item_id:
+        iid, _, proj_id = item_id.partition(":")
+        item = get_item(conn, iid)
+        proj = get_project(conn, proj_id)
+        if not item or not proj:
+            answer_callback(cb_id, "Не нашёл позицию или проект")
+            return
+        item_set_in_project(conn, iid, proj_id)
+        inv_increment_seen(conn, user_id)
+        inv_log_event(conn, user_id, iid, f"{item['name']} → {proj['name']}", "project")
+        answer_callback(cb_id, f"В проекте {proj['name']}")
+        send(chat_id, f"🔧 {item['name']} — в проекте {proj['name']}.")
+        _inv_advance(conn, chat_id, user_id)
+        return
 
     item = get_item(conn, item_id) if item_id else None
+    if action == "proj" and item:
+        answer_callback(cb_id)
+        _inv_show_project_picker(conn, chat_id, item)
+        return
     if action == "ok" and item:
         inv_mark_present(conn, item_id)
         inv_increment_seen(conn, user_id)
@@ -829,9 +882,10 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
     """Apply a verification outcome expressed in free text to the current card."""
     item_id = item["id"]
     name = item["name"]
-    if note:
+    # Для in_project параметр note несёт название проекта, а не заметку.
+    if note and action != "in_project":
         item_append_note(conn, item_id, note)
-    noted = " Заметку записал." if note else ""
+    noted = " Заметку записал." if note and action != "in_project" else ""
 
     if action == "ok":
         inv_mark_present(conn, item_id)
@@ -863,6 +917,17 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         unit = _unit_ru(item["unit"])
         send(chat_id, f"✏️ {name}: записал {qty:g} {unit} (было {old_total:g}).{noted}")
         _inv_advance(conn, chat_id, user_id)
+    elif action == "in_project":
+        proj = _resolve_project(conn, note or "")
+        if proj:
+            item_set_in_project(conn, item_id, proj["id"])
+            inv_clear_await(conn, user_id)
+            inv_increment_seen(conn, user_id)
+            inv_log_event(conn, user_id, item_id, f"{name} → {proj['name']}", "project")
+            send(chat_id, f"🔧 {name} — в проекте {proj['name']}.")
+            _inv_advance(conn, chat_id, user_id)
+        else:
+            _inv_show_project_picker(conn, chat_id, item)
     elif action == "skip":
         sess = inv_get(conn, user_id)
         inv_clear_await(conn, user_id)
@@ -906,7 +971,9 @@ def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
         return True
 
     try:
-        intent = classify_inv_intent(item["name"], _unit_ru(item["unit"]), f"{item['total_qty']:g}", text)
+        project_names = [p["name"] for p in list_projects(conn)]
+        intent = classify_inv_intent(item["name"], _unit_ru(item["unit"]), f"{item['total_qty']:g}",
+                                     text, projects=project_names)
     except Exception as exc:
         print(f"inv intent error: {type(exc).__name__}: {exc}", flush=True)
         if awaiting_id:
@@ -921,6 +988,9 @@ def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
         return True
     if intent["action"] == "note":
         _inv_apply_action(conn, chat_id, user_id, item, "note", note=intent["note"] or text)
+        return True
+    if intent["action"] == "in_project":
+        _inv_apply_action(conn, chat_id, user_id, item, "in_project", note=intent.get("project") or "")
         return True
     _inv_apply_action(conn, chat_id, user_id, item, intent["action"], qty=intent["qty"], note=intent["note"])
     return True
