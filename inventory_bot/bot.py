@@ -304,12 +304,7 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
                     qty_part = f"{qty:g} {html_escape(unit)}"
                 else:
                     qty_part = f"{qty:g}/{total:g} {html_escape(unit)}"
-                status_text = STATUS_LABELS.get(row["status"], row["status"])
-                status_part = f"<i>{html_escape(status_text)}</i>" if status_text else ""
-                line_bits = [f"• {name_part} — {qty_part}"]
-                if status_part:
-                    line_bits.append(f"({status_part})")
-                out.append(" ".join(line_bits))
+                out.append(f"• {name_part} — {qty_part}")
             out.append("")
         send_html(chat_id, "\n".join(out).strip())
     elif cmd == "/projects":
