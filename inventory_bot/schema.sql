@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS inv_sessions (
   last_prompt_message_id INTEGER NOT NULL DEFAULT 0,
   pass_no INTEGER NOT NULL DEFAULT 1,
   skipped_json TEXT NOT NULL DEFAULT '[]',
-  current_item_id TEXT NOT NULL DEFAULT ''
+  current_item_id TEXT NOT NULL DEFAULT '',
+  await_kind TEXT NOT NULL DEFAULT 'qty'
 );
 
 CREATE TABLE IF NOT EXISTS inv_events (

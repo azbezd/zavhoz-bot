@@ -27,6 +27,7 @@ def _migrate(conn) -> None:
             ("pass_no", "INTEGER NOT NULL DEFAULT 1"),
             ("skipped_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("current_item_id", "TEXT NOT NULL DEFAULT ''"),
+            ("await_kind", "TEXT NOT NULL DEFAULT 'qty'"),
         ],
     }
     for table, columns in wanted.items():
@@ -206,18 +207,26 @@ def inv_get(conn, user_id: int):
     return conn.execute("SELECT * FROM inv_sessions WHERE user_id = ?", (user_id,)).fetchone()
 
 
-def inv_set_await(conn, user_id: int, item_id: str) -> None:
+def inv_set_await(conn, user_id: int, item_id: str, kind: str = "qty") -> None:
     conn.execute(
-        "UPDATE inv_sessions SET await_qty_for = ?, last_action_at = ? WHERE user_id = ?",
-        (item_id, utc_now(), user_id),
+        "UPDATE inv_sessions SET await_qty_for = ?, await_kind = ?, last_action_at = ? WHERE user_id = ?",
+        (item_id, kind, utc_now(), user_id),
     )
     conn.commit()
 
 
 def inv_clear_await(conn, user_id: int) -> None:
     conn.execute(
-        "UPDATE inv_sessions SET await_qty_for = '', last_action_at = ? WHERE user_id = ?",
+        "UPDATE inv_sessions SET await_qty_for = '', await_kind = 'qty', last_action_at = ? WHERE user_id = ?",
         (utc_now(), user_id),
+    )
+    conn.commit()
+
+
+def item_set_category(conn, item_id: str, category: str) -> None:
+    conn.execute(
+        "UPDATE items SET category = ?, updated_at = ? WHERE id = ?",
+        (category.strip().lower(), utc_now(), item_id),
     )
     conn.commit()
 

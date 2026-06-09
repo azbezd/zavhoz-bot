@@ -57,6 +57,7 @@ try:
         inv_start,
         item_add_photo,
         item_append_note,
+        item_set_category,
         item_set_in_project,
         item_first_photo,
         item_first_source,
@@ -103,6 +104,7 @@ except ImportError:
         inv_start,
         item_add_photo,
         item_append_note,
+        item_set_category,
         item_set_in_project,
         item_first_photo,
         item_first_source,
@@ -542,6 +544,8 @@ def _chat_with_stream(conn, chat_id: int, user_id: int, text: str) -> str:
     return reply
 
 
+NBSP = "\u00a0"  # неразрывный пробел
+
 UNIT_LABELS = {"pcs": "шт", "m": "м", "meters": "м", "mm": "мм", "cm": "см", "g": "г", "kg": "кг"}
 
 
@@ -553,7 +557,7 @@ def _inv_keyboard(item_id: str, skipped_count: int = 0, pass_no: int = 1) -> dic
     rows = [
         [
             {"text": "✅ Свободно", "callback_data": f"inv:ok:{item_id}"},
-            {"text": "✏️ Кол-во", "callback_data": f"inv:qty:{item_id}"},
+            {"text": "✏️ Изм.", "callback_data": f"inv:edit:{item_id}"},
         ],
         [
             {"text": "🔧 В проекте", "callback_data": f"inv:proj:{item_id}"},
@@ -565,6 +569,34 @@ def _inv_keyboard(item_id: str, skipped_count: int = 0, pass_no: int = 1) -> dic
         last_row.append({"text": f"↩️ Пропущенные ({skipped_count})", "callback_data": "inv:retskip:_"})
     rows.append(last_row)
     return {"inline_keyboard": rows}
+
+
+def _inv_show_edit_menu(conn, chat_id: int, item) -> None:
+    kb = {"inline_keyboard": [
+        [
+            {"text": "🔢 Количество", "callback_data": f"inv:qty:{item['id']}"},
+            {"text": "🏷 Категория", "callback_data": f"inv:cat:{item['id']}"},
+        ],
+        [{"text": "↩️ Отмена", "callback_data": "inv:pcancel:_"}],
+    ]}
+    send_with_keyboard(chat_id, f"Что меняем у «{html_escape(item['name'])}»?", kb)
+
+
+def _inv_show_category_picker(conn, chat_id: int, item) -> None:
+    rows, row = [], []
+    for key, label in CATEGORY_LABELS.items():
+        mark = "· " if key == item["category"] else ""
+        row.append({"text": f"{mark}{label}", "callback_data": f"inv:cset:{item['id']}:{key}"})
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([{"text": "✍️ Своя — напишу текстом", "callback_data": f"inv:cnew:{item['id']}"}])
+    rows.append([{"text": "↩️ Отмена", "callback_data": "inv:pcancel:_"}])
+    cur = CATEGORY_LABELS.get(item["category"], item["category"] or "—")
+    send_with_keyboard(chat_id, f"Категория для «{html_escape(item['name'])}» (сейчас: {cur}):",
+                       {"inline_keyboard": rows})
 
 
 def _inv_show_project_picker(conn, chat_id: int, item) -> None:
@@ -608,19 +640,24 @@ def _inv_show_current(conn, chat_id: int, user_id: int) -> bool:
     total = item["total_qty"]
     unit = html_escape(_unit_ru(item["unit"]))
     price = item["price_rub"] or 0
+    status = STATUS_LABELS.get(item["status"], item["status"])
     src_title, src_url = item_first_source(conn, item["id"])
-    src_part = f'\n🔗 <a href="{html_escape(src_url)}">{html_escape(src_title or "источник")}</a>' if src_url else ""
-    qty_part = f"{qty:g} {unit}" if qty == total else f"{qty:g}/{total:g} {unit}"
-    progress = f"📋 {done + 1} из {total_count}"
+    qty_part = f"{qty:g}{NBSP}{unit}" if qty == total else f"{qty:g}/{total:g}{NBSP}{unit}"
+    progress = f"📋 {done + 1}{NBSP}из{NBSP}{total_count}"
     if pass_no >= 2:
         progress += "  ·  ↩️ второй круг"
-    caption = (
-        f"{progress}\n"
-        f"<b>{name}</b>\n"
-        f"{cat}  ·  по базе: <b>{qty_part}</b>"
-        + (f"  ·  {price:g} ₽" if price else "")
-        + src_part
-    )
+    lines = [
+        f"<i>{progress}</i>",
+        f"<b>{name}</b>",
+        "",
+        f"🏷 {cat}",
+        f"🔢 По базе: <b>{qty_part}</b>  ·  {html_escape(status)}",
+    ]
+    if price:
+        lines.append(f"💰 {price:g}{NBSP}₽")
+    if src_url:
+        lines.append(f'🔗 <a href="{html_escape(src_url)}">{html_escape(src_title or "источник")}</a>')
+    caption = "\n".join(lines)
     photo = item_first_photo(conn, item["id"])
     kb = _inv_keyboard(item["id"], skipped_count=len(skipped), pass_no=pass_no)
     if photo:
@@ -790,11 +827,40 @@ def handle_callback_query(conn, callback: dict) -> None:
         send(chat_id, f"🔧 {item['name']} — в проекте {proj['name']}.")
         _inv_advance(conn, chat_id, user_id)
         return
+    if action == "cset" and item_id:
+        iid, _, cat_key = item_id.partition(":")
+        item = get_item(conn, iid)
+        if not item:
+            answer_callback(cb_id, "Не нашёл позицию")
+            return
+        item_set_category(conn, iid, cat_key)
+        label = CATEGORY_LABELS.get(cat_key, cat_key)
+        answer_callback(cb_id, "Категория обновлена")
+        send(chat_id, f"🏷 {item['name']} → {label}. Карточка обновится, жду ответа по наличию.")
+        _inv_advance(conn, chat_id, user_id)
+        return
+    if action == "cnew" and item_id:
+        item = get_item(conn, item_id)
+        if not item:
+            answer_callback(cb_id, "Не нашёл позицию")
+            return
+        inv_set_await(conn, user_id, item_id, kind="cat")
+        answer_callback(cb_id, "Жду название")
+        send(chat_id, "Напиши название новой категории одним сообщением.")
+        return
 
     item = get_item(conn, item_id) if item_id else None
     if action == "proj" and item:
         answer_callback(cb_id)
         _inv_show_project_picker(conn, chat_id, item)
+        return
+    if action == "edit" and item:
+        answer_callback(cb_id)
+        _inv_show_edit_menu(conn, chat_id, item)
+        return
+    if action == "cat" and item:
+        answer_callback(cb_id)
+        _inv_show_category_picker(conn, chat_id, item)
         return
     if action == "ok" and item:
         inv_mark_present(conn, item_id)
@@ -834,7 +900,7 @@ def handle_callback_query(conn, callback: dict) -> None:
         ]]}
         send_with_keyboard(
             chat_id,
-            f"Сколько по факту? Сейчас по базе {item['total_qty']:g} {unit}. "
+            f"Сколько по факту? Сейчас по базе {item['total_qty']:g}{NBSP}{unit}. "
             f"Напиши число (можно с точкой, например 2.5).",
             kb,
         )
@@ -915,7 +981,7 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         inv_increment_seen(conn, user_id)
         inv_log_event(conn, user_id, item_id, name, "qty", old_total=old_total, new_total=qty)
         unit = _unit_ru(item["unit"])
-        send(chat_id, f"✏️ {name}: записал {qty:g} {unit} (было {old_total:g}).{noted}")
+        send(chat_id, f"✏️ {name}: записал {qty:g}{NBSP}{unit} (было {old_total:g}).{noted}")
         _inv_advance(conn, chat_id, user_id)
     elif action == "in_project":
         proj = _resolve_project(conn, note or "")
@@ -960,6 +1026,14 @@ def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
     item = get_item(conn, current_id) if current_id else None
     if not item:
         return False
+
+    if awaiting_id and sess["await_kind"] == "cat":
+        cat = text.strip().lower()
+        item_set_category(conn, awaiting_id, cat)
+        inv_clear_await(conn, user_id)
+        send(chat_id, f"🏷 {item['name']} → {cat}. Карточка обновится, жду ответа по наличию.")
+        _inv_advance(conn, chat_id, user_id)
+        return True
 
     qty = _parse_qty(text)
     if qty is not None:
