@@ -1,9 +1,28 @@
 import json
 import os
+import socket
 import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+
+
+# Force IPv6-only resolution for hosts where IPv4 is slow/unreliable from this VPS.
+# The provider's IPv4 path to api.telegram.org has 15s connect stalls; IPv6 is fine.
+_IPV6_ONLY_HOSTS = {"api.telegram.org"}
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv6_first_getaddrinfo(host, *args, **kwargs):
+    results = _orig_getaddrinfo(host, *args, **kwargs)
+    if host in _IPV6_ONLY_HOSTS:
+        v6 = [r for r in results if r[0] == socket.AF_INET6]
+        if v6:
+            return v6
+    return results
+
+
+socket.getaddrinfo = _ipv6_first_getaddrinfo
 
 try:
     from .export_inventory import export_items, maybe_git_sync
@@ -68,7 +87,10 @@ def telegram(method: str, payload: dict | None = None, timeout: int = 30) -> dic
         data = urllib.parse.urlencode(payload).encode("utf-8")
     req = urllib.request.Request(f"{API_BASE}/bot{token()}/{method}", data=data, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        body = json.loads(resp.read().decode("utf-8"))
+    if not body.get("ok", False):
+        raise RuntimeError(f"telegram {method} returned ok=false: {body}")
+    return body
 
 
 def send(chat_id: int, text: str) -> None:
