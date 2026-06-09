@@ -1055,7 +1055,14 @@ def main() -> None:
                     except Exception as exc:
                         print(f"callback_query error: {type(exc).__name__}: {exc}", flush=True)
                 elif "message" in update:
-                    handle_message(conn, update["message"])
+                    try:
+                        handle_message(conn, update["message"])
+                    except Exception as exc:
+                        print(f"message error: {type(exc).__name__}: {exc}", flush=True)
+                        try:
+                            send(int(update["message"]["chat"]["id"]), f"Сбой при обработке: {exc}")
+                        except Exception:
+                            pass
             send_errors = 0
         except Exception as exc:
             send_errors += 1

@@ -181,7 +181,7 @@ def item_first_photo(conn, item_id: str):
 def item_first_source(conn, item_id: str):
     row = conn.execute(
         "SELECT title, url FROM item_sources WHERE item_id = ? "
-        "ORDER BY CASE kind WHEN 'purchase' THEN 0 ELSE 1 END, id LIMIT 1",
+        "ORDER BY CASE kind WHEN 'purchase' THEN 0 ELSE 1 END, rowid LIMIT 1",
         (item_id,),
     ).fetchone()
     return (row["title"], row["url"]) if row else (None, None)
@@ -400,11 +400,11 @@ def list_items_with_sources(conn, limit: int = 200):
             i.unit, i.location,
             (SELECT s.url FROM item_sources s
              WHERE s.item_id = i.id
-             ORDER BY CASE s.kind WHEN 'purchase' THEN 0 ELSE 1 END, s.id
+             ORDER BY CASE s.kind WHEN 'purchase' THEN 0 ELSE 1 END, s.rowid
              LIMIT 1) AS source_url,
             (SELECT s.title FROM item_sources s
              WHERE s.item_id = i.id
-             ORDER BY CASE s.kind WHEN 'purchase' THEN 0 ELSE 1 END, s.id
+             ORDER BY CASE s.kind WHEN 'purchase' THEN 0 ELSE 1 END, s.rowid
              LIMIT 1) AS source_title
         FROM items i
         ORDER BY i.category, i.name
