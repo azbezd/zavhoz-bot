@@ -26,7 +26,7 @@ socket.getaddrinfo = _ipv6_first_getaddrinfo
 
 try:
     from .export_inventory import export_items, maybe_git_sync
-    from .openai_chat import chat_reply
+    from .openai_chat import chat_reply, chat_reply_stream
     from .openai_extract import extract_inventory_proposal
     from .storage import (
         apply_proposal,
@@ -46,7 +46,7 @@ try:
     )
 except ImportError:
     from export_inventory import export_items, maybe_git_sync
-    from openai_chat import chat_reply
+    from openai_chat import chat_reply, chat_reply_stream
     from openai_extract import extract_inventory_proposal
     from storage import (
         apply_proposal,
@@ -95,6 +95,30 @@ def telegram(method: str, payload: dict | None = None, timeout: int = 30) -> dic
 
 def send(chat_id: int, text: str) -> None:
     telegram("sendMessage", {"chat_id": chat_id, "text": text[:3900]})
+
+
+def send_chat_action(chat_id: int, action: str = "typing") -> None:
+    try:
+        telegram("sendChatAction", {"chat_id": chat_id, "action": action}, timeout=5)
+    except Exception:
+        pass
+
+
+def send_draft(chat_id: int, draft_id: int, text: str) -> bool:
+    """Stream a partial message via Bot API 9.5 sendMessageDraft. Returns True on
+    success. Drafts with the same draft_id animate; empty text shows a built-in
+    'Thinking…' placeholder.
+    """
+    try:
+        telegram(
+            "sendMessageDraft",
+            {"chat_id": chat_id, "draft_id": draft_id, "text": text[:3900]},
+            timeout=10,
+        )
+        return True
+    except Exception as exc:
+        print(f"draft error: {exc}", flush=True)
+        return False
 
 
 def looks_like_inventory_update(text: str, has_photo: bool) -> bool:
@@ -234,6 +258,62 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
         send(chat_id, "Не знаю такую команду. Можно просто написать обычным текстом, я разберусь.")
 
 
+def _chat_with_stream(conn, chat_id: int, user_id: int, text: str) -> str:
+    """Stream OpenAI Responses output into a Telegram message draft. Falls back to
+    a plain synchronous chat_reply + sendMessage if drafts or streaming fail.
+    Returns the final reply text. Always sends the final persisted sendMessage.
+    """
+    draft_id = int(time.time() * 1000) & 0x7FFFFFFF or 1
+    drafts_alive = send_draft(chat_id, draft_id, "")
+    if not drafts_alive:
+        # Fallback A: no drafts → synchronous reply
+        try:
+            reply = chat_reply(conn, user_id, text, recent_chat(conn, user_id), get_preferences(conn))
+        except Exception as exc:
+            print(f"chat_reply FAILED: {type(exc).__name__}: {exc}", flush=True)
+            reply = (
+                "Я вижу сообщение, но AI-ответ сейчас не сработал.\n"
+                f"Причина: {exc}\n\n"
+                "Складовые команды без AI работают: /list, /projects, /pending."
+            )
+        send(chat_id, reply)
+        return reply
+
+    accumulated = ""
+    last_push = time.monotonic()
+    MIN_INTERVAL = 1.7  # seconds — stays under Telegram's edit rate limit
+    MIN_DELTA = 20      # characters — avoid noise from tiny tokens
+
+    try:
+        for delta in chat_reply_stream(conn, user_id, text, recent_chat(conn, user_id), get_preferences(conn)):
+            accumulated += delta
+            now = time.monotonic()
+            if now - last_push >= MIN_INTERVAL and len(accumulated) - 0 >= MIN_DELTA:
+                if send_draft(chat_id, draft_id, accumulated):
+                    last_push = now
+                else:
+                    # draft broke mid-stream — finish the stream, send plain
+                    print("draft fell over mid-stream, will sendMessage at end", flush=True)
+                    drafts_alive = False
+    except Exception as exc:
+        print(f"stream FAILED: {type(exc).__name__}: {exc}", flush=True)
+        # Stream broke; if we have anything, send it; otherwise fall back to plain chat_reply
+        if not accumulated.strip():
+            try:
+                accumulated = chat_reply(conn, user_id, text, recent_chat(conn, user_id), get_preferences(conn))
+            except Exception as exc2:
+                accumulated = (
+                    "Я вижу сообщение, но AI-ответ сейчас не сработал.\n"
+                    f"Причина: {exc2}\n\n"
+                    "Складовые команды без AI работают: /list, /projects, /pending."
+                )
+
+    reply = accumulated.strip() or "Я не смог сформулировать ответ. Попробуй ещё раз чуть конкретнее."
+    # Persist as a real, non-ephemeral message. The 30-second draft preview will fade on its own.
+    send(chat_id, reply)
+    return reply
+
+
 def handle_message(conn, message: dict) -> None:
     chat_id = int(message["chat"]["id"])
     user_id = int(message.get("from", {}).get("id", 0))
@@ -263,6 +343,7 @@ def handle_message(conn, message: dict) -> None:
     remember_chat(conn, user_id, "user", text or "[photo]")
     if looks_like_inventory_update(text, bool(photo_paths)):
         print(f"step: route=inventory", flush=True)
+        send_chat_action(chat_id, "typing")
         send(chat_id, "Понял, похоже на изменение склада. Сейчас соберу черновик, ничего сам не запишу без подтверждения.")
         try:
             proposal = extract_inventory_proposal(text, [os.path.join(repo_dir, path) for path in photo_paths])
@@ -279,21 +360,10 @@ def handle_message(conn, message: dict) -> None:
         send(chat_id, reply)
         print(f"step: inventory sent", flush=True)
     else:
-        print(f"step: route=chat, calling openai", flush=True)
-        try:
-            reply = chat_reply(conn, user_id, text, recent_chat(conn, user_id), get_preferences(conn))
-            print(f"step: chat_reply ok len={len(reply)}", flush=True)
-        except Exception as exc:
-            print(f"step: chat_reply FAILED: {type(exc).__name__}: {exc}", flush=True)
-            reply = (
-                "Я вижу сообщение, но AI-ответ сейчас не сработал.\n"
-                f"Причина: {exc}\n\n"
-                "Складовые команды без AI работают: /list, /projects, /pending."
-            )
+        print(f"step: route=chat, streaming openai", flush=True)
+        reply = _chat_with_stream(conn, chat_id, user_id, text)
         remember_chat(conn, user_id, "assistant", reply)
-        print(f"step: sending reply", flush=True)
-        send(chat_id, reply)
-        print(f"step: reply sent ok", flush=True)
+        print(f"step: chat done len={len(reply)}", flush=True)
 
 
 def main() -> None:
