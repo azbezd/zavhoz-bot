@@ -404,11 +404,16 @@ def _chat_with_stream(conn, chat_id: int, user_id: int, text: str) -> str:
 
 def handle_message(conn, message: dict) -> None:
     chat_id = int(message["chat"]["id"])
+    chat_type = message.get("chat", {}).get("type", "private")
     user_id = int(message.get("from", {}).get("id", 0))
-    print(f"message chat_id={chat_id} user_id={user_id} text={message.get('text')!r} has_photo={bool(message.get('photo'))}", flush=True)
+    print(f"message chat_id={chat_id} chat_type={chat_type} user_id={user_id} text={message.get('text')!r} has_photo={bool(message.get('photo'))}", flush=True)
+    # Hard rule: only respond in private chats with explicitly whitelisted users.
+    # Don't acknowledge anything outside that — no "access denied", no echoed
+    # user_id, no chat activity from groups/channels. Silent drop.
+    if chat_type != "private":
+        return
     allowed = allowed_user_ids()
     if allowed and user_id not in allowed:
-        send(chat_id, f"Access denied. Your Telegram user ID: {user_id}")
         return
 
     text = message.get("text") or message.get("caption") or ""
