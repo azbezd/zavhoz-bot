@@ -18,6 +18,10 @@ If screenshots contain seller/order/product text, infer purchase status:
 When possible, research or cite the purchase/reference source and summarize practical hardware knowledge:
 pinout/manual keywords, voltage, interface, common use, caveats.
 If web research is unavailable or uncertain, leave source_url empty and say what needs checking in notes.
+Marketplace links (ozon, wildberries, aliexpress, avito) rot quickly and listings are imprecise:
+use such a link only to extract the item name, price and photo at add time, but DO NOT store it
+in source_url — leave source_url empty unless it is a stable vendor/manufacturer page
+(amperkot.ru, chipdip.ru, datasheet sites). Price is optional: use 0 when unknown, never guess.
 Supported operations:
 - add_item: add a new owned item or wishlist item
 - adjust_qty: increase/decrease quantity of an existing item
@@ -82,8 +86,8 @@ JSON_SCHEMA = {
                         "source_notes": {"type": "string"},
                         "knowledge_summary": {"type": "string"},
                         "specs": {
-                            "type": "object",
-                            "additionalProperties": {"type": "string"},
+                            "type": "string",
+                            "description": "Key specs as a JSON object encoded into a string, e.g. {\"voltage\": \"5V\"}. Use \"{}\" when unknown.",
                         },
                         "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
                     },
@@ -126,7 +130,7 @@ def extract_inventory_proposal(text: str, photo_paths: list[str]) -> dict:
                     "source_url": "",
                     "source_notes": "",
                     "knowledge_summary": "",
-                    "specs": {},
+                    "specs": "{}",
                     "confidence": "low",
                 }
             ],

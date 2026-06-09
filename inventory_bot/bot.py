@@ -39,8 +39,10 @@ try:
         get_proposal,
         inv_clear_await,
         inv_events_for,
+        inv_clear_pending,
         inv_finish,
         inv_get,
+        inv_get_pending,
         inv_increment_seen,
         inv_log_event,
         inv_mark_lost,
@@ -51,14 +53,18 @@ try:
         inv_set_await,
         inv_set_current,
         inv_set_pass,
+        inv_set_pending,
         inv_set_prompt_message,
         inv_set_skipped,
         inv_skipped,
         inv_start,
         item_add_photo,
         item_append_note,
+        item_projects,
+        item_retire,
         item_set_category,
         item_set_in_project,
+        item_split_to_project,
         item_first_photo,
         item_first_source,
         list_items,
@@ -86,8 +92,10 @@ except ImportError:
         get_proposal,
         inv_clear_await,
         inv_events_for,
+        inv_clear_pending,
         inv_finish,
         inv_get,
+        inv_get_pending,
         inv_increment_seen,
         inv_log_event,
         inv_mark_lost,
@@ -98,14 +106,18 @@ except ImportError:
         inv_set_await,
         inv_set_current,
         inv_set_pass,
+        inv_set_pending,
         inv_set_prompt_message,
         inv_set_skipped,
         inv_skipped,
         inv_start,
         item_add_photo,
         item_append_note,
+        item_projects,
+        item_retire,
         item_set_category,
         item_set_in_project,
+        item_split_to_project,
         item_first_photo,
         item_first_source,
         list_items,
@@ -290,29 +302,31 @@ def send_draft(chat_id: int, draft_id: int, text: str) -> bool:
 def looks_like_inventory_update(text: str, has_photo: bool) -> bool:
     if has_photo:
         return True
-    lowered = text.lower()
+    lowered = text.lower().strip()
+    # Вопросы — это разговор со складом, а не его изменение.
+    question_starts = ("сколько", "что ", "какие", "какой", "какая", "где", "есть ли",
+                       "как ", "почему", "зачем", "покажи", "расскажи", "посоветуй")
+    if "?" in lowered or lowered.startswith(question_starts):
+        return False
     markers = [
         "купил",
         "купила",
+        "нашёл",
+        "нашел",
+        "заказал",
         "пришло",
         "приехало",
         "добавь",
         "занеси",
-        "нашел",
-        "нашёл",
         "использовал",
         "поставил",
         "потратил",
         "сломал",
         "потерял",
         "спиши",
-        "резистор",
-        "esp32",
-        "arduino",
-        "модуль",
-        "провод",
-        "датчик",
-        "конденсатор",
+        "списал",
+        "выкинул",
+        "выбросил",
     ]
     return any(marker in lowered for marker in markers)
 
@@ -640,7 +654,6 @@ def _inv_show_current(conn, chat_id: int, user_id: int) -> bool:
     total = item["total_qty"]
     unit = html_escape(_unit_ru(item["unit"]))
     price = item["price_rub"] or 0
-    status = STATUS_LABELS.get(item["status"], item["status"])
     src_title, src_url = item_first_source(conn, item["id"])
     qty_part = f"{qty:g}{NBSP}{unit}" if qty == total else f"{qty:g}/{total:g}{NBSP}{unit}"
     progress = f"📋 {done + 1}{NBSP}из{NBSP}{total_count}"
@@ -651,8 +664,11 @@ def _inv_show_current(conn, chat_id: int, user_id: int) -> bool:
         f"<b>{name}</b>",
         "",
         f"🏷 {cat}",
-        f"🔢 По базе: <b>{qty_part}</b>  ·  {html_escape(status)}",
+        f"🔢 По базе: <b>{qty_part}</b>",
     ]
+    proj_names = item_projects(conn, item["id"])
+    if proj_names:
+        lines.append(f"🔧 В проекте: {html_escape(', '.join(proj_names))}")
     if price:
         lines.append(f"💰 {price:g}{NBSP}₽")
     if src_url:
@@ -695,11 +711,15 @@ def _inv_finish_with_summary(conn, chat_id: int, user_id: int) -> None:
         return
     events = inv_events_for(conn, user_id)
     done, total_count = inv_progress(conn, user_id)
-    ok_count = sum(1 for e in events if e["action"] == "ok")
     uncounted = [e for e in events if e["action"] == "uncounted"]
-    qty_changes = [e for e in events if e["action"] == "qty"]
+    all_qty = [e for e in events if e["action"] == "qty"]
+    # Числа без фактического изменения — это просто подтверждения.
+    qty_changes = [e for e in all_qty if e["old_total"] != e["new_total"]]
+    ok_count = sum(1 for e in events if e["action"] == "ok") + (len(all_qty) - len(qty_changes))
     lost = [e for e in events if e["action"] == "lost"]
     in_projects = [e for e in events if e["action"] == "project"]
+    splits = [e for e in events if e["action"] == "split"]
+    consumed = [e for e in events if e["action"] == "consumed"]
     unchecked = max(0, total_count - done)
 
     lines = [f"<b>Итог инвентаризации</b>  ·  проверено {done} из {total_count}"]
@@ -709,6 +729,10 @@ def _inv_finish_with_summary(conn, chat_id: int, user_id: int) -> None:
         lines.append("🔧 В проектах:")
         for e in in_projects:
             lines.append(f"  • {html_escape(e['item_name'])}")
+    if splits:
+        lines.append("🔀 Разделено (часть в проект):")
+        for e in splits:
+            lines.append(f"  • {html_escape(e['item_name'])}")
     if uncounted:
         lines.append(f"📦 Есть, без пересчёта: {len(uncounted)}")
     if qty_changes:
@@ -717,6 +741,10 @@ def _inv_finish_with_summary(conn, chat_id: int, user_id: int) -> None:
             old = f"{e['old_total']:g}" if e["old_total"] is not None else "?"
             new = f"{e['new_total']:g}" if e["new_total"] is not None else "?"
             lines.append(f"  • {html_escape(e['item_name'])}: {old} → {new}")
+    if consumed:
+        lines.append("🗑 Списано (из учёта убрано):")
+        for e in consumed:
+            lines.append(f"  • {html_escape(e['item_name'])}")
     if lost:
         lines.append("❌ Потеряно:")
         for e in lost:
@@ -726,7 +754,7 @@ def _inv_finish_with_summary(conn, chat_id: int, user_id: int) -> None:
     inv_finish(conn, user_id)
 
     synced = ""
-    if qty_changes or lost or in_projects:
+    if qty_changes or lost or in_projects or splits or consumed:
         repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
         try:
             export_items(repo_dir)
@@ -808,6 +836,25 @@ def handle_callback_query(conn, callback: dict) -> None:
         inv_clear_await(conn, user_id)
         answer_callback(cb_id, "Отменил")
         _inv_advance(conn, chat_id, user_id)
+        return
+    if action == "cyes":
+        pending = inv_get_pending(conn, user_id)
+        inv_clear_pending(conn, user_id)
+        if not pending:
+            answer_callback(cb_id, "Нечего подтверждать")
+            return
+        item = get_item(conn, pending.get("item_id", ""))
+        if not item:
+            answer_callback(cb_id, "Позиция не найдена")
+            return
+        answer_callback(cb_id, "Применяю")
+        _inv_apply_action(conn, chat_id, user_id, item, pending.get("action", ""),
+                          qty=pending.get("qty"), note=pending.get("note"))
+        return
+    if action == "cno":
+        inv_clear_pending(conn, user_id)
+        answer_callback(cb_id, "Отменил")
+        send(chat_id, "Ок, не записал. Поясни словами или нажми кнопку под карточкой.")
         return
     if action == "pcancel":
         answer_callback(cb_id, "Отменил")
@@ -927,6 +974,8 @@ _INV_RULES = {
     "pause": {"пауза", "перерыв", "продолжим позже", "продолжу позже"},
     "uncounted": {"не считал", "не считала", "есть но не считал", "есть, но не считал",
                   "не знаю сколько", "хз сколько", "не знаю"},
+    "consumed": {"списал", "списано", "спиши", "израсходовал", "израсходовано",
+                 "выкинул", "выбросил", "использовал все", "использовал всё", "кончились", "кончился"},
 }
 
 
@@ -994,6 +1043,27 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
             _inv_advance(conn, chat_id, user_id)
         else:
             _inv_show_project_picker(conn, chat_id, item)
+    elif action == "consumed":
+        item_retire(conn, item_id)
+        inv_clear_await(conn, user_id)
+        inv_increment_seen(conn, user_id)
+        inv_log_event(conn, user_id, item_id, name, "consumed", old_total=item["total_qty"])
+        send(chat_id, f"🗑 {name} — списал, из учёта убрано.{noted}")
+        _inv_advance(conn, chat_id, user_id)
+    elif action == "split" and qty is not None:
+        # qty здесь = сколько ушло в проект; note = название проекта (выверено заранее).
+        proj = _resolve_project(conn, note or "")
+        if not proj:
+            send(chat_id, "Не понял, в какой проект ушла часть. Назови проект: FreeNet, FreeNetBox, NetBox, DachaNetBox.")
+            return
+        new_id, remaining = item_split_to_project(conn, item_id, qty, proj["id"])
+        inv_clear_await(conn, user_id)
+        inv_increment_seen(conn, user_id)
+        inv_log_event(conn, user_id, item_id, f"{name}: {qty:g} → {proj['name']}, свободно {remaining:g}", "split")
+        unit = _unit_ru(item["unit"])
+        send(chat_id, f"🔀 {name}: {qty:g}{NBSP}{unit} → {proj['name']} (новая позиция в списке), "
+                      f"свободно осталось {remaining:g}{NBSP}{unit}.")
+        _inv_advance(conn, chat_id, user_id)
     elif action == "skip":
         sess = inv_get(conn, user_id)
         inv_clear_await(conn, user_id)
@@ -1066,8 +1136,45 @@ def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
     if intent["action"] == "in_project":
         _inv_apply_action(conn, chat_id, user_id, item, "in_project", note=intent.get("project") or "")
         return True
+    if intent["action"] == "split":
+        if intent["qty_used"] is None:
+            send(chat_id, "Понял, что часть ушла в проект, но не понял сколько. Скажи числом: сколько в проекте и сколько свободно.")
+            return True
+        proj_name = intent.get("project") or ""
+        if not proj_name or not _resolve_project(conn, proj_name):
+            send(chat_id, "Понял, что часть ушла в проект, но не понял в какой. "
+                          "Скажи целиком, например: «2 ушли во FreeNet, 3 свободны».")
+            return True
+        unit = _unit_ru(item["unit"])
+        free_part = f", свободно {intent['qty']:g}{NBSP}{unit}" if intent["qty"] is not None else ""
+        _inv_request_confirm(
+            conn, chat_id, user_id,
+            {"action": "split", "item_id": item["id"], "qty": intent["qty_used"], "note": proj_name},
+            f"Понял так: «{item['name']}» — {intent['qty_used']:g}{NBSP}{unit} в проект "
+            f"{proj_name}{free_part}. Применяю?",
+        )
+        return True
+    if intent["action"] == "qty" and intent["note"]:
+        # Число с оговорками («2 куска по 3 и 4 см») — не пишем молча, переспрашиваем.
+        unit = _unit_ru(item["unit"])
+        _inv_request_confirm(
+            conn, chat_id, user_id,
+            {"action": "qty", "item_id": item["id"], "qty": intent["qty"], "note": intent["note"]},
+            f"Понял так: «{item['name']}» — количество {intent['qty']:g}{NBSP}{unit}, "
+            f"заметка: «{intent['note']}». Записываю?",
+        )
+        return True
     _inv_apply_action(conn, chat_id, user_id, item, intent["action"], qty=intent["qty"], note=intent["note"])
     return True
+
+
+def _inv_request_confirm(conn, chat_id: int, user_id: int, payload: dict, question: str) -> None:
+    inv_set_pending(conn, user_id, payload)
+    kb = {"inline_keyboard": [[
+        {"text": "✅ Да", "callback_data": "inv:cyes:_"},
+        {"text": "↩️ Нет, поясню", "callback_data": "inv:cno:_"},
+    ]]}
+    send_with_keyboard(chat_id, html_escape(question), kb)
 
 
 def handle_message(conn, message: dict) -> None:

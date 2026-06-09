@@ -28,6 +28,7 @@ def _migrate(conn) -> None:
             ("skipped_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("current_item_id", "TEXT NOT NULL DEFAULT ''"),
             ("await_kind", "TEXT NOT NULL DEFAULT 'qty'"),
+            ("pending_json", "TEXT NOT NULL DEFAULT ''"),
         ],
     }
     for table, columns in wanted.items():
@@ -160,6 +161,7 @@ def list_items(conn, limit: int = 80):
         """
         SELECT id, name, category, status, available_qty, total_qty, unit, location
         FROM items
+        WHERE status != 'retired'
         ORDER BY category, name
         LIMIT ?
         """,
@@ -221,6 +223,90 @@ def inv_clear_await(conn, user_id: int) -> None:
         (utc_now(), user_id),
     )
     conn.commit()
+
+
+def inv_set_pending(conn, user_id: int, payload: dict) -> None:
+    conn.execute(
+        "UPDATE inv_sessions SET pending_json = ?, last_action_at = ? WHERE user_id = ?",
+        (json.dumps(payload, ensure_ascii=False), utc_now(), user_id),
+    )
+    conn.commit()
+
+
+def inv_get_pending(conn, user_id: int):
+    sess = inv_get(conn, user_id)
+    if not sess or not sess["pending_json"]:
+        return None
+    try:
+        return json.loads(sess["pending_json"])
+    except json.JSONDecodeError:
+        return None
+
+
+def inv_clear_pending(conn, user_id: int) -> None:
+    conn.execute(
+        "UPDATE inv_sessions SET pending_json = '', last_action_at = ? WHERE user_id = ?",
+        (utc_now(), user_id),
+    )
+    conn.commit()
+
+
+def item_projects(conn, item_id: str) -> list:
+    rows = conn.execute(
+        "SELECT DISTINCT p.name FROM item_usage u JOIN projects p ON p.id = u.project_id "
+        "WHERE u.item_id = ? ORDER BY p.name",
+        (item_id,),
+    ).fetchall()
+    return [r["name"] for r in rows]
+
+
+def item_retire(conn, item_id: str) -> None:
+    """Consumed/written off: gone for good, cannot be pulled back out of anything."""
+    now = utc_now()
+    conn.execute(
+        "UPDATE items SET status = 'retired', total_qty = 0, available_qty = 0, "
+        "last_verified_at = ?, updated_at = ? WHERE id = ?",
+        (now, now, item_id),
+    )
+    conn.commit()
+
+
+def item_split_to_project(conn, item_id: str, qty_used: float, project_id: str) -> tuple:
+    """Move part of a position into a project as a NEW item (it stays in /list
+    under the project and can be pulled back later); the rest stays free.
+    Returns (new_id, remaining_qty)."""
+    item = get_item(conn, item_id)
+    if not item:
+        raise ValueError(f"no item {item_id}")
+    now = utc_now()
+    new_id = next_item_id(conn)
+    remaining = max(0.0, (item["total_qty"] or 0) - qty_used)
+    conn.execute(
+        "INSERT INTO items (id, name, category, status, total_qty, available_qty, unit, location, "
+        "notes, description, price_rub, last_verified_at, created_at, updated_at) "
+        "VALUES (?, ?, ?, 'in_use', ?, 0, ?, ?, '', ?, ?, ?, ?, ?)",
+        (new_id, item["name"], item["category"], qty_used, item["unit"], item["location"],
+         item["description"], item["price_rub"], now, now, now),
+    )
+    conn.execute(
+        "INSERT INTO item_usage (item_id, project_id, qty, role, since, removable) VALUES (?, ?, ?, '', ?, 1)",
+        (new_id, project_id, qty_used, now[:10]),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO item_photos (item_id, path) SELECT ?, path FROM item_photos WHERE item_id = ?",
+        (new_id, item_id),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO item_sources (item_id, kind, title, url, notes) "
+        "SELECT ?, kind, title, url, notes FROM item_sources WHERE item_id = ?",
+        (new_id, item_id),
+    )
+    conn.execute(
+        "UPDATE items SET total_qty = ?, available_qty = ?, last_verified_at = ?, updated_at = ? WHERE id = ?",
+        (remaining, remaining, now, now, item_id),
+    )
+    conn.commit()
+    return new_id, remaining
 
 
 def item_set_category(conn, item_id: str, category: str) -> None:
@@ -307,7 +393,7 @@ def inv_next_item(conn, user_id: int):
         f"""
         SELECT id, name, category, status, total_qty, available_qty, unit, location, price_rub, description, last_verified_at, notes
         FROM items
-        WHERE status NOT IN ('retired', 'wishlist')
+        WHERE status NOT IN ('retired', 'wishlist', 'in_use')
           AND (last_verified_at IS NULL OR last_verified_at = '' OR last_verified_at < ?)
           {clause}
         ORDER BY price_rub DESC, name ASC
@@ -328,7 +414,7 @@ def inv_progress(conn, user_id: int) -> tuple:
         SELECT
           SUM(CASE WHEN last_verified_at >= ? THEN 1 ELSE 0 END) AS done,
           COUNT(*) AS total
-        FROM items WHERE status NOT IN ('retired', 'wishlist')
+        FROM items WHERE status NOT IN ('retired', 'wishlist', 'in_use')
         """,
         (started,),
     ).fetchone()
@@ -440,6 +526,7 @@ def list_items_with_sources(conn, limit: int = 200):
              ORDER BY CASE s.kind WHEN 'purchase' THEN 0 ELSE 1 END, s.rowid
              LIMIT 1) AS source_title
         FROM items i
+        WHERE i.status != 'retired'
         ORDER BY i.category, i.name
         LIMIT ?
         """,
@@ -567,7 +654,10 @@ def apply_proposal(conn, proposal_id: int) -> dict:
                     VALUES (?, ?, ?, ?)
                     ON CONFLICT(item_id) DO UPDATE SET summary = excluded.summary, specs_json = excluded.specs_json, updated_at = excluded.updated_at
                     """,
-                    (item_id, knowledge_summary, json.dumps(op.get("specs") or {}, ensure_ascii=False), now),
+                    (item_id, knowledge_summary,
+                     op.get("specs") if isinstance(op.get("specs"), str) and op.get("specs")
+                     else json.dumps(op.get("specs") or {}, ensure_ascii=False),
+                     now),
                 )
             applied.append({"op": op_name, "item_id": item_id})
 

@@ -32,11 +32,12 @@ SYSTEM_PROMPT = """Ты Завхоз — умный Telegram-помощник д
 """
 
 
-def inventory_snapshot(conn, limit: int = 30) -> str:
+def inventory_snapshot(conn, limit: int = 80) -> str:
     rows = conn.execute(
         """
         SELECT name, category, status, available_qty, total_qty, unit, location
         FROM items
+        WHERE status != 'retired'
         ORDER BY updated_at DESC, id DESC
         LIMIT ?
         """,
@@ -113,13 +114,18 @@ INV_INTENT_PROMPT = """Ты разбираешь ответ пользовате
 Пользователю показана позиция, он отвечает свободным текстом. Определи намерение.
 
 Верни СТРОГО один JSON-объект без пояснений:
-{"action": "...", "qty": число или null, "note": "строка или null", "project": "строка или null"}
+{"action": "...", "qty": число или null, "qty_used": число или null, "note": "строка или null", "project": "строка или null"}
 
 Допустимые action:
 - "ok" — подтверждает: позиция на месте, свободна ("да", "есть", "всё ок", "на месте")
-- "in_project" — позиция есть, но стоит/используется в проекте; положи название проекта в project,
+- "in_project" — ВСЯ позиция стоит/используется в проекте; положи название проекта в project,
   ТОЧНО как в списке известных проектов ("используется во FreeNet", "стоит в NetBox").
   Если проект не назван или не из списка — project=null.
+- "split" — ЧАСТЬ ушла в проект, часть осталась свободной ("2 ушли во FreeNet, 3 свободны",
+  "один стоит в NetBox, остальные в коробке"). qty_used=сколько в проекте, qty=сколько осталось
+  свободно (null если не сказано), project=куда ушло.
+- "consumed" — израсходовано/списано/выброшено, НЕ потеряно ("израсходовал", "списал", "выкинул",
+  "использовал все"). Позиция уйдёт из учёта безвозвратно.
 - "lost" — позиции нет, потерял ("нет", "не нашёл", "потерял")
 - "qty" — называет количество/длину; положи число в qty ("осталось 2", "примерно 3 метра", "штуки четыре")
 - "uncounted" — позиция есть, но точно посчитать/измерить не может ("есть, но не считал", "не знаю сколько", "размеры не определить")
@@ -131,6 +137,8 @@ INV_INTENT_PROMPT = """Ты разбираешь ответ пользовате
 
 Если в тексте и подтверждение, и заметка ("всё ок, лежат в ящике 3") — action="ok", note=заметка.
 Если число с уточнением ("2, но один сломан") — action="qty", qty=2, note="один сломан".
+ВАЖНО: если ответ описывает размеры/состояние сложнее простого числа ("2 куска по 3 и 4 см") —
+action="qty" с qty=общее число И ОБЯЗАТЕЛЬНО note с деталями; бот переспросит подтверждение.
 """
 
 
@@ -174,15 +182,18 @@ def classify_inv_intent(item_name: str, unit: str, current_qty: str, text: str,
         raise RuntimeError(f"no JSON in intent answer: {answer[:120]!r}")
     data = json.loads(answer[start:end + 1])
     action = str(data.get("action", "")).lower()
-    if action not in ("ok", "in_project", "lost", "qty", "uncounted", "skip", "stop", "pause", "note", "chat"):
+    if action not in ("ok", "in_project", "split", "consumed", "lost", "qty", "uncounted",
+                      "skip", "stop", "pause", "note", "chat"):
         raise RuntimeError(f"bad intent action: {action!r}")
     qty = data.get("qty")
     qty = float(qty) if isinstance(qty, (int, float)) else None
+    qty_used = data.get("qty_used")
+    qty_used = float(qty_used) if isinstance(qty_used, (int, float)) else None
     note = data.get("note")
     note = str(note).strip() if note else None
     project = data.get("project")
     project = str(project).strip() if project else None
-    return {"action": action, "qty": qty, "note": note, "project": project}
+    return {"action": action, "qty": qty, "qty_used": qty_used, "note": note, "project": project}
 
 
 def chat_reply_stream(conn, user_id: int, text: str, recent_messages, preferences: dict):
