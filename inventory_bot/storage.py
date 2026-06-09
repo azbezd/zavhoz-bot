@@ -29,6 +29,7 @@ def _migrate(conn) -> None:
             ("current_item_id", "TEXT NOT NULL DEFAULT ''"),
             ("await_kind", "TEXT NOT NULL DEFAULT 'qty'"),
             ("pending_json", "TEXT NOT NULL DEFAULT ''"),
+            ("mode", "TEXT NOT NULL DEFAULT 'walk'"),
         ],
     }
     for table, columns in wanted.items():
@@ -191,18 +192,34 @@ def item_first_source(conn, item_id: str):
     return (row["title"], row["url"]) if row else (None, None)
 
 
-def inv_start(conn, user_id: int, chat_id: int) -> None:
+def inv_start(conn, user_id: int, chat_id: int, mode: str = "walk") -> None:
     now = utc_now()
     conn.execute(
-        "INSERT INTO inv_sessions (user_id, chat_id, started_at, last_action_at, seen, await_qty_for, last_prompt_message_id, pass_no, skipped_json, current_item_id) "
-        "VALUES (?, ?, ?, ?, 0, '', 0, 1, '[]', '') "
+        "INSERT INTO inv_sessions (user_id, chat_id, started_at, last_action_at, seen, await_qty_for, last_prompt_message_id, pass_no, skipped_json, current_item_id, mode) "
+        "VALUES (?, ?, ?, ?, 0, '', 0, 1, '[]', '', ?) "
         "ON CONFLICT(user_id) DO UPDATE SET chat_id = excluded.chat_id, started_at = excluded.started_at, "
         "last_action_at = excluded.last_action_at, seen = 0, await_qty_for = '', last_prompt_message_id = 0, "
-        "pass_no = 1, skipped_json = '[]', current_item_id = ''",
-        (user_id, chat_id, now, now),
+        "pass_no = 1, skipped_json = '[]', current_item_id = '', mode = excluded.mode",
+        (user_id, chat_id, now, now, mode),
     )
     conn.execute("DELETE FROM inv_events WHERE user_id = ?", (user_id,))
     conn.commit()
+
+
+def items_in_category(conn, category: str, offset: int = 0, limit: int = 8):
+    return conn.execute(
+        "SELECT id, name, available_qty, total_qty, unit FROM items "
+        "WHERE category = ? AND status != 'retired' ORDER BY price_rub DESC, name "
+        "LIMIT ? OFFSET ?",
+        (category, limit + 1, offset),
+    ).fetchall()
+
+
+def categories_with_counts(conn):
+    return conn.execute(
+        "SELECT category, COUNT(*) AS cnt FROM items WHERE status != 'retired' "
+        "GROUP BY category ORDER BY category"
+    ).fetchall()
 
 
 def inv_get(conn, user_id: int):

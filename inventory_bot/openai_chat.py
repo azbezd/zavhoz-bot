@@ -15,6 +15,9 @@ SYSTEM_PROMPT = """Ты Завхоз — умный Telegram-помощник д
 - Пиши обычным текстом. Абзацы разделяй пустой строкой.
 - Эмодзи можно умеренно (для акцентов, не каждый абзац).
 - Если нужен список — короткие пункты на отдельных строках, без буллетов.
+- На вопросы о наличии («сколько резисторов», «какие датчики есть») отвечай СПИСКОМ
+  подходящих позиций, по строке на позицию: «Название — N шт», и в конце строки ссылка
+  на магазин из снапшота, если есть (голым URL, Telegram сам подсветит). Не отвечай голой суммой.
 - Полный список склада не пытайся выдать сам, направь пользователя на /list.
   /list рендерится с правильной разметкой и группами; ты вручную лучше не сделаешь.
 
@@ -34,13 +37,15 @@ SYSTEM_PROMPT = """Ты Завхоз — умный Telegram-помощник д
 """
 
 
-def inventory_snapshot(conn, limit: int = 80) -> str:
+def inventory_snapshot(conn, limit: int = 120) -> str:
     rows = conn.execute(
         """
-        SELECT name, category, status, available_qty, total_qty, unit, location
-        FROM items
-        WHERE status != 'retired'
-        ORDER BY updated_at DESC, id DESC
+        SELECT i.name, i.category, i.status, i.available_qty, i.total_qty, i.unit, i.location,
+               (SELECT s.url FROM item_sources s WHERE s.item_id = i.id
+                ORDER BY CASE s.kind WHEN 'purchase' THEN 0 ELSE 1 END, s.rowid LIMIT 1) AS url
+        FROM items i
+        WHERE i.status != 'retired'
+        ORDER BY i.category, i.name
         LIMIT ?
         """,
         (limit,),
@@ -51,7 +56,7 @@ def inventory_snapshot(conn, limit: int = 80) -> str:
     for row in rows:
         lines.append(
             f"{row['name']} | {row['category']} | {row['status']} | "
-            f"{row['available_qty']:g}/{row['total_qty']:g} {row['unit']} | {row['location']}"
+            f"{row['available_qty']:g}/{row['total_qty']:g} {row['unit']} | {row['url'] or '-'}"
         )
     return "\n".join(lines)
 

@@ -31,6 +31,7 @@ try:
     from .openai_extract import extract_inventory_proposal
     from .storage import (
         apply_proposal,
+        categories_with_counts,
         connect,
         discard_proposal,
         get_item,
@@ -59,6 +60,7 @@ try:
         inv_skipped,
         inv_start,
         item_add_photo,
+        items_in_category,
         item_append_note,
         item_projects,
         item_retire,
@@ -84,6 +86,7 @@ except ImportError:
     from openai_extract import extract_inventory_proposal
     from storage import (
         apply_proposal,
+        categories_with_counts,
         connect,
         discard_proposal,
         get_item,
@@ -112,6 +115,7 @@ except ImportError:
         inv_skipped,
         inv_start,
         item_add_photo,
+        items_in_category,
         item_append_note,
         item_projects,
         item_retire,
@@ -415,11 +419,11 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
             groups.setdefault(row["category"] or "other", []).append(row)
         order = [c for c in CATEGORY_LABELS if c in groups] + [c for c in groups if c not in CATEGORY_LABELS]
 
-        out = ["<b>📋 Склад</b>", f"<i>Всего позиций: {len(rows)}</i>", ""]
+        send(chat_id, f"📋 Склад: {len(rows)} позиций, {len(order)} групп. Каждая группа — отдельным сообщением.")
         for cat in order:
             items = groups[cat]
             label = CATEGORY_LABELS.get(cat, html_escape(cat))
-            out.append(f"<b>{label}</b> · {len(items)}")
+            out = [f"<b>{label}</b> · {len(items)}"]
             for row in items:
                 name = html_escape(row["name"])
                 src_url = row["source_url"] if "source_url" in row.keys() else None
@@ -429,14 +433,13 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
                     name_part = name
                 qty = row["available_qty"]
                 total = row["total_qty"]
-                unit = row["unit"] or "шт"
+                unit = _unit_ru(row["unit"])
                 if qty == total:
-                    qty_part = f"{qty:g} {html_escape(unit)}"
+                    qty_part = f"{qty:g}{NBSP}{html_escape(unit)}"
                 else:
-                    qty_part = f"{qty:g}/{total:g} {html_escape(unit)}"
+                    qty_part = f"{qty:g}/{total:g}{NBSP}{html_escape(unit)}"
                 out.append(f"• {name_part} — {qty_part}")
-            out.append("")
-        send_html(chat_id, "\n".join(out).strip())
+            send_html(chat_id, "\n".join(out))
     elif cmd == "/projects":
         rows = list_projects(conn)
         if not rows:
@@ -469,6 +472,9 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
         send(chat_id, f"Запомнил стиль общения: {value}")
     elif cmd in ("/inv", "/inventory"):
         sess = inv_get(conn, user_id)
+        if sess and sess["mode"] == "pick":
+            inv_finish(conn, user_id)
+            sess = None
         if sess:
             done, total_count = inv_progress(conn, user_id)
             kb = {"inline_keyboard": [[
@@ -483,6 +489,15 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
                           "«есть, но не считал», «потом». Любой другой текст станет заметкой к позиции, "
                           "фото — прикрепится к ней.")
             _inv_advance(conn, chat_id, user_id)
+    elif cmd == "/edit":
+        sess = inv_get(conn, user_id)
+        if sess and sess["mode"] == "walk":
+            send(chat_id, "Идёт инвентаризация — меняй позиции прямо в её карточках, "
+                          "или заверши её (/stop_inv) и потом /edit.")
+        else:
+            if sess:
+                inv_finish(conn, user_id)
+            _pick_show_categories(conn, chat_id)
     elif cmd == "/skipped":
         sess = inv_get(conn, user_id)
         if not sess:
@@ -628,6 +643,39 @@ def _inv_show_project_picker(conn, chat_id: int, item) -> None:
     send_with_keyboard(chat_id, f"Где используется «{html_escape(item['name'])}»?", {"inline_keyboard": rows})
 
 
+def _pick_show_categories(conn, chat_id: int) -> None:
+    rows, row = [], []
+    for cat in categories_with_counts(conn):
+        label = CATEGORY_LABELS.get(cat["category"], cat["category"] or "—")
+        row.append({"text": f"{label} · {cat['cnt']}", "callback_data": f"pick:cat:{cat['category']}:0"})
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    send_with_keyboard(chat_id, "✏️ Что меняем? Выбери группу:", {"inline_keyboard": rows})
+
+
+def _pick_show_items(conn, chat_id: int, category: str, offset: int) -> None:
+    items = items_in_category(conn, category, offset=offset, limit=8)
+    has_more = len(items) > 8
+    items = items[:8]
+    rows = []
+    for it in items:
+        unit = _unit_ru(it["unit"])
+        label = f"{it['name'][:38]} · {it['total_qty']:g}{NBSP}{unit}"
+        rows.append([{"text": label, "callback_data": f"pick:item:{it['id']}"}])
+    nav = []
+    if offset > 0:
+        nav.append({"text": "◂ Назад", "callback_data": f"pick:cat:{category}:{max(0, offset - 8)}"})
+    if has_more:
+        nav.append({"text": "Ещё ▸", "callback_data": f"pick:cat:{category}:{offset + 8}"})
+    nav.append({"text": "↩️ Группы", "callback_data": "pick:cats:_"})
+    rows.append(nav)
+    label = CATEGORY_LABELS.get(category, category or "—")
+    send_with_keyboard(chat_id, f"{label} — выбери позицию:", {"inline_keyboard": rows})
+
+
 def _resolve_project(conn, text: str):
     """Match free-form project mention to a project row; None if ambiguous/unknown."""
     needle = (text or "").strip().lower()
@@ -646,8 +694,14 @@ def _inv_show_current(conn, chat_id: int, user_id: int) -> bool:
     item = inv_next_item(conn, user_id)
     if not item:
         return False
+    _inv_show_item(conn, chat_id, user_id, item)
+    return True
+
+
+def _inv_show_item(conn, chat_id: int, user_id: int, item) -> None:
     sess = inv_get(conn, user_id)
     pass_no = sess["pass_no"] if sess else 1
+    picking = bool(sess and sess["mode"] == "pick")
     skipped = inv_skipped(conn, user_id)
     done, total_count = inv_progress(conn, user_id)
     name = html_escape(item["name"])
@@ -658,9 +712,12 @@ def _inv_show_current(conn, chat_id: int, user_id: int) -> bool:
     price = item["price_rub"] or 0
     src_title, src_url = item_first_source(conn, item["id"])
     qty_part = f"{qty:g}{NBSP}{unit}" if qty == total else f"{qty:g}/{total:g}{NBSP}{unit}"
-    progress = f"📋 {done + 1}{NBSP}из{NBSP}{total_count}"
-    if pass_no >= 2:
-        progress += "  ·  ↩️ второй круг"
+    if picking:
+        progress = "✏️ точечное изменение"
+    else:
+        progress = f"📋 {done + 1}{NBSP}из{NBSP}{total_count}"
+        if pass_no >= 2:
+            progress += "  ·  ↩️ второй круг"
     lines = [
         f"<i>{progress}</i>",
         f"<b>{name}</b>",
@@ -687,15 +744,29 @@ def _inv_show_current(conn, chat_id: int, user_id: int) -> bool:
     if msg_id:
         inv_set_prompt_message(conn, user_id, msg_id)
     inv_set_current(conn, user_id, item["id"])
-    return True
+
+
+def _inv_show_back(conn, chat_id: int, user_id: int) -> None:
+    """Re-show the current card after a cancel/category change instead of moving on."""
+    sess = inv_get(conn, user_id)
+    if sess and sess["mode"] == "pick" and sess["current_item_id"]:
+        item = get_item(conn, sess["current_item_id"])
+        if item:
+            _inv_show_item(conn, chat_id, user_id, item)
+            return
+    _inv_advance(conn, chat_id, user_id)
 
 
 def _inv_advance(conn, chat_id: int, user_id: int) -> None:
     """Show the next card; switch to the skipped round when the main one ends;
-    finish with a summary when nothing is left."""
+    finish with a summary when nothing is left. In pick mode just close."""
+    sess = inv_get(conn, user_id)
+    if sess and sess["mode"] == "pick":
+        inv_finish(conn, user_id)
+        send(chat_id, "Готово. Изменить ещё позицию — /edit.")
+        return
     if _inv_show_current(conn, chat_id, user_id):
         return
-    sess = inv_get(conn, user_id)
     if sess and sess["pass_no"] == 1:
         skipped = inv_skipped(conn, user_id)
         if skipped:
@@ -787,6 +858,28 @@ def handle_callback_query(conn, callback: dict) -> None:
         answer_callback(cb_id)
         return
 
+    if data.startswith("pick:"):
+        answer_callback(cb_id)
+        rest = data[5:]
+        if rest == "cats:_":
+            _pick_show_categories(conn, chat_id)
+        elif rest.startswith("cat:"):
+            cat_part = rest[4:]
+            category, _, off = cat_part.rpartition(":")
+            _pick_show_items(conn, chat_id, category, int(off or 0))
+        elif rest.startswith("item:"):
+            item = get_item(conn, rest[5:])
+            if not item:
+                send(chat_id, "Позиция не найдена.")
+                return
+            sess = inv_get(conn, user_id)
+            if sess and sess["mode"] == "walk":
+                send(chat_id, "Идёт инвентаризация — сначала заверши её (/stop_inv).")
+                return
+            inv_start(conn, user_id, chat_id, mode="pick")
+            _inv_show_item(conn, chat_id, user_id, item)
+        return
+
     if not data.startswith("inv:"):
         answer_callback(cb_id)
         return
@@ -837,7 +930,7 @@ def handle_callback_query(conn, callback: dict) -> None:
     if action == "qcancel":
         inv_clear_await(conn, user_id)
         answer_callback(cb_id, "Отменил")
-        _inv_advance(conn, chat_id, user_id)
+        _inv_show_back(conn, chat_id, user_id)
         return
     if action == "cyes":
         pending = inv_get_pending(conn, user_id)
@@ -860,7 +953,7 @@ def handle_callback_query(conn, callback: dict) -> None:
         return
     if action == "pcancel":
         answer_callback(cb_id, "Отменил")
-        _inv_advance(conn, chat_id, user_id)
+        _inv_show_back(conn, chat_id, user_id)
         return
     if action == "pset" and item_id:
         iid, _, proj_id = item_id.partition(":")
@@ -885,8 +978,8 @@ def handle_callback_query(conn, callback: dict) -> None:
         item_set_category(conn, iid, cat_key)
         label = CATEGORY_LABELS.get(cat_key, cat_key)
         answer_callback(cb_id, "Категория обновлена")
-        send(chat_id, f"🏷 {item['name']} → {label}. Карточка обновится, жду ответа по наличию.")
-        _inv_advance(conn, chat_id, user_id)
+        send(chat_id, f"🏷 {item['name']} → {label}.")
+        _inv_show_back(conn, chat_id, user_id)
         return
     if action == "cnew" and item_id:
         item = get_item(conn, item_id)
@@ -1270,6 +1363,7 @@ def set_my_commands() -> None:
     commands = [
         {"command": "list", "description": "📋 Склад по категориям"},
         {"command": "inv", "description": "🔍 Инвентаризация (старт/продолжить)"},
+        {"command": "edit", "description": "✏️ Изменить позицию (выбор из списка)"},
         {"command": "skipped", "description": "↩️ К пропущенным позициям"},
         {"command": "stop_inv", "description": "⏹ Завершить инвентаризацию"},
         {"command": "projects", "description": "🛠 Проекты"},
