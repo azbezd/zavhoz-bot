@@ -53,8 +53,22 @@ except ImportError:
         apply_proposal,
         connect,
         discard_proposal,
+        get_item,
         get_preferences,
         get_proposal,
+        inv_clear_await,
+        inv_finish,
+        inv_get,
+        inv_increment_seen,
+        inv_mark_lost,
+        inv_mark_present,
+        inv_mark_qty,
+        inv_next_item,
+        inv_set_await,
+        inv_set_prompt_message,
+        inv_start,
+        item_first_photo,
+        item_first_source,
         list_items,
         list_items_with_sources,
         list_pending,
@@ -159,6 +173,60 @@ STATUS_LABELS = {
 def send_chat_action(chat_id: int, action: str = "typing") -> None:
     try:
         telegram("sendChatAction", {"chat_id": chat_id, "action": action}, timeout=5)
+    except Exception:
+        pass
+
+
+def send_photo(chat_id: int, photo_url: str, caption: str, reply_markup: dict | None = None) -> int | None:
+    """Send a photo by URL with a caption. Returns the new message_id on success."""
+    payload = {
+        "chat_id": chat_id,
+        "photo": photo_url,
+        "caption": caption[:1000],
+        "parse_mode": "HTML",
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    try:
+        body = telegram("sendPhoto", payload, timeout=20)
+        return body.get("result", {}).get("message_id")
+    except Exception as exc:
+        print(f"sendPhoto error: {exc}", flush=True)
+        return None
+
+
+def send_with_keyboard(chat_id: int, text: str, reply_markup: dict) -> int | None:
+    payload = {
+        "chat_id": chat_id,
+        "text": text[:3900],
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "true",
+        "reply_markup": json.dumps(reply_markup, ensure_ascii=False),
+    }
+    try:
+        body = telegram("sendMessage", payload)
+        return body.get("result", {}).get("message_id")
+    except Exception as exc:
+        print(f"sendMessage(keyboard) error: {exc}", flush=True)
+        return None
+
+
+def edit_reply_markup(chat_id: int, message_id: int, reply_markup: dict | None) -> None:
+    payload = {"chat_id": chat_id, "message_id": message_id}
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    try:
+        telegram("editMessageReplyMarkup", payload, timeout=10)
+    except Exception as exc:
+        print(f"editMessageReplyMarkup error: {exc}", flush=True)
+
+
+def answer_callback(callback_query_id: str, text: str | None = None) -> None:
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text[:200]
+    try:
+        telegram("answerCallbackQuery", payload, timeout=5)
     except Exception:
         pass
 
@@ -337,6 +405,17 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
         value = " ".join(parts[1:])
         set_preference(conn, "style", value)
         send(chat_id, f"Запомнил стиль общения: {value}")
+    elif cmd in ("/inv", "/inventory"):
+        inv_start(conn, user_id, chat_id)
+        send(chat_id, "Начинаю инвентаризацию. Иду от самых дорогих к самым дешёвым. "
+                       "Нажми кнопку под каждой позицией; /stop_inv в любой момент.")
+        if not _inv_show_current(conn, chat_id, user_id):
+            _inv_finish_with_summary(conn, chat_id, user_id)
+    elif cmd in ("/stop_inv", "/inv_stop"):
+        if inv_get(conn, user_id):
+            _inv_finish_with_summary(conn, chat_id, user_id)
+        else:
+            send(chat_id, "Сессии инвентаризации нет.")
     else:
         send(chat_id, "Не знаю такую команду. Можно просто написать обычным текстом, я разберусь.")
 
@@ -397,6 +476,132 @@ def _chat_with_stream(conn, chat_id: int, user_id: int, text: str) -> str:
     return reply
 
 
+def _inv_keyboard(item_id: str) -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Всё на месте", "callback_data": f"inv:ok:{item_id}"},
+                {"text": "🟡 Меньше", "callback_data": f"inv:less:{item_id}"},
+            ],
+            [
+                {"text": "❌ Потерял", "callback_data": f"inv:lost:{item_id}"},
+                {"text": "⏭ Пропустить", "callback_data": f"inv:skip:{item_id}"},
+            ],
+            [
+                {"text": "⏹ Закончить", "callback_data": "inv:stop:_"},
+            ],
+        ]
+    }
+
+
+def _inv_show_current(conn, chat_id: int, user_id: int) -> bool:
+    """Pick next item and send it. Returns False if nothing left."""
+    item = inv_next_item(conn, user_id)
+    if not item:
+        return False
+    name = html_escape(item["name"])
+    cat = CATEGORY_LABELS.get(item["category"], html_escape(item["category"] or "—"))
+    qty = item["available_qty"]
+    total = item["total_qty"]
+    unit = html_escape(item["unit"] or "шт")
+    price = item["price_rub"] or 0
+    src_title, src_url = item_first_source(conn, item["id"])
+    src_part = f'\n🔗 <a href="{html_escape(src_url)}">{html_escape(src_title or "источник")}</a>' if src_url else ""
+    qty_part = f"{qty:g} {unit}" if qty == total else f"{qty:g}/{total:g} {unit}"
+    caption = (
+        f"<b>{name}</b>\n"
+        f"{cat}  ·  по базе: <b>{qty_part}</b>"
+        + (f"  ·  {price:g} ₽" if price else "")
+        + src_part
+    )
+    photo = item_first_photo(conn, item["id"])
+    kb = _inv_keyboard(item["id"])
+    if photo:
+        msg_id = send_photo(chat_id, photo, caption, reply_markup=kb)
+        if msg_id is None:
+            msg_id = send_with_keyboard(chat_id, caption, kb)
+    else:
+        msg_id = send_with_keyboard(chat_id, caption, kb)
+    if msg_id:
+        inv_set_prompt_message(conn, user_id, msg_id)
+    return True
+
+
+def _inv_finish_with_summary(conn, chat_id: int, user_id: int) -> None:
+    sess = inv_get(conn, user_id)
+    seen = sess["seen"] if sess else 0
+    inv_finish(conn, user_id)
+    send(chat_id, f"Закончил инвентаризацию. Проверено позиций: {seen}.")
+
+
+def handle_callback_query(conn, callback: dict) -> None:
+    cb_id = callback.get("id", "")
+    user = callback.get("from", {}) or {}
+    user_id = int(user.get("id", 0))
+    msg = callback.get("message", {}) or {}
+    chat = msg.get("chat", {}) or {}
+    chat_id = int(chat.get("id", 0))
+    chat_type = chat.get("type", "private")
+    data = callback.get("data", "")
+
+    if chat_type != "private":
+        answer_callback(cb_id)
+        return
+    allowed = allowed_user_ids()
+    if allowed and user_id not in allowed:
+        answer_callback(cb_id)
+        return
+
+    if not data.startswith("inv:"):
+        answer_callback(cb_id)
+        return
+
+    parts = data.split(":", 2)
+    action = parts[1] if len(parts) > 1 else ""
+    item_id = parts[2] if len(parts) > 2 else ""
+
+    sess = inv_get(conn, user_id)
+    if not sess:
+        answer_callback(cb_id, "Сессия инвентаризации не запущена. Команда /inv.")
+        return
+
+    # Снимаем клавиатуру у предыдущего сообщения
+    msg_id = msg.get("message_id")
+    if msg_id:
+        edit_reply_markup(chat_id, int(msg_id), None)
+
+    if action == "stop":
+        answer_callback(cb_id, "Остановил")
+        _inv_finish_with_summary(conn, chat_id, user_id)
+        return
+
+    if action == "ok" and item_id:
+        inv_mark_present(conn, item_id)
+        inv_increment_seen(conn, user_id)
+        answer_callback(cb_id, "Отмечено: всё на месте")
+    elif action == "lost" and item_id:
+        inv_mark_lost(conn, item_id)
+        inv_increment_seen(conn, user_id)
+        answer_callback(cb_id, "Отмечено: потерял")
+    elif action == "skip" and item_id:
+        # Skip: считаем «проверено» этой сессией чтобы не выскакивало снова, но qty не трогаем.
+        inv_mark_present(conn, item_id)
+        inv_increment_seen(conn, user_id)
+        answer_callback(cb_id, "Пропустил")
+    elif action == "less" and item_id:
+        inv_set_await(conn, user_id, item_id)
+        answer_callback(cb_id, "Жду число")
+        send(chat_id, "Сколько штук осталось? Напиши число.")
+        return
+    else:
+        answer_callback(cb_id)
+        return
+
+    # Дальше — следующая позиция или финал
+    if not _inv_show_current(conn, chat_id, user_id):
+        _inv_finish_with_summary(conn, chat_id, user_id)
+
+
 def handle_message(conn, message: dict) -> None:
     chat_id = int(message["chat"]["id"])
     chat_type = message.get("chat", {}).get("type", "private")
@@ -412,6 +617,24 @@ def handle_message(conn, message: dict) -> None:
         return
 
     text = message.get("text") or message.get("caption") or ""
+
+    # Inventory mode: if waiting on a number, consume the message as that number.
+    sess = inv_get(conn, user_id)
+    if sess and sess["await_qty_for"] and text and not text.startswith("/"):
+        item_id = sess["await_qty_for"]
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if digits:
+            new_total = float(digits)
+            inv_mark_qty(conn, item_id, new_total)
+            inv_clear_await(conn, user_id)
+            inv_increment_seen(conn, user_id)
+            send(chat_id, f"Записал: осталось {new_total:g}.")
+            if not _inv_show_current(conn, chat_id, user_id):
+                _inv_finish_with_summary(conn, chat_id, user_id)
+        else:
+            send(chat_id, "Нужно число, например 5. Или нажми «⏹ Закончить» под позицией.")
+        return
+
     if text.startswith("/"):
         handle_command(conn, chat_id, user_id, text)
         return
@@ -467,12 +690,21 @@ def main() -> None:
     print(f"inventory bot started allowed_user_ids={allowed}", flush=True)
     while True:
         try:
-            updates = telegram("getUpdates", {"timeout": 10, "offset": offset}, timeout=25)
+            updates = telegram(
+                "getUpdates",
+                {"timeout": 10, "offset": offset, "allowed_updates": json.dumps(["message", "callback_query"])},
+                timeout=25,
+            )
             if updates.get("result"):
                 print(f"received updates count={len(updates.get('result', []))} offset={offset}", flush=True)
             for update in updates.get("result", []):
                 offset = max(offset, int(update["update_id"]) + 1)
-                if "message" in update:
+                if "callback_query" in update:
+                    try:
+                        handle_callback_query(conn, update["callback_query"])
+                    except Exception as exc:
+                        print(f"callback_query error: {type(exc).__name__}: {exc}", flush=True)
+                elif "message" in update:
                     handle_message(conn, update["message"])
             send_errors = 0
         except Exception as exc:

@@ -147,6 +147,127 @@ def list_items(conn, limit: int = 80):
     ).fetchall()
 
 
+def get_item(conn, item_id: str):
+    row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    return row
+
+
+def item_first_photo(conn, item_id: str):
+    row = conn.execute(
+        "SELECT path FROM item_photos WHERE item_id = ? ORDER BY rowid LIMIT 1",
+        (item_id,),
+    ).fetchone()
+    return row["path"] if row else None
+
+
+def item_first_source(conn, item_id: str):
+    row = conn.execute(
+        "SELECT title, url FROM item_sources WHERE item_id = ? "
+        "ORDER BY CASE kind WHEN 'purchase' THEN 0 ELSE 1 END, id LIMIT 1",
+        (item_id,),
+    ).fetchone()
+    return (row["title"], row["url"]) if row else (None, None)
+
+
+def inv_start(conn, user_id: int, chat_id: int) -> None:
+    now = utc_now()
+    conn.execute(
+        "INSERT INTO inv_sessions (user_id, chat_id, started_at, last_action_at, seen, await_qty_for, last_prompt_message_id) "
+        "VALUES (?, ?, ?, ?, 0, '', 0) "
+        "ON CONFLICT(user_id) DO UPDATE SET chat_id = excluded.chat_id, started_at = excluded.started_at, "
+        "last_action_at = excluded.last_action_at, seen = 0, await_qty_for = '', last_prompt_message_id = 0",
+        (user_id, chat_id, now, now),
+    )
+    conn.commit()
+
+
+def inv_get(conn, user_id: int):
+    return conn.execute("SELECT * FROM inv_sessions WHERE user_id = ?", (user_id,)).fetchone()
+
+
+def inv_set_await(conn, user_id: int, item_id: str) -> None:
+    conn.execute(
+        "UPDATE inv_sessions SET await_qty_for = ?, last_action_at = ? WHERE user_id = ?",
+        (item_id, utc_now(), user_id),
+    )
+    conn.commit()
+
+
+def inv_clear_await(conn, user_id: int) -> None:
+    conn.execute(
+        "UPDATE inv_sessions SET await_qty_for = '', last_action_at = ? WHERE user_id = ?",
+        (utc_now(), user_id),
+    )
+    conn.commit()
+
+
+def inv_increment_seen(conn, user_id: int) -> None:
+    conn.execute(
+        "UPDATE inv_sessions SET seen = seen + 1, last_action_at = ? WHERE user_id = ?",
+        (utc_now(), user_id),
+    )
+    conn.commit()
+
+
+def inv_set_prompt_message(conn, user_id: int, message_id: int) -> None:
+    conn.execute(
+        "UPDATE inv_sessions SET last_prompt_message_id = ? WHERE user_id = ?",
+        (message_id, user_id),
+    )
+    conn.commit()
+
+
+def inv_finish(conn, user_id: int) -> None:
+    conn.execute("DELETE FROM inv_sessions WHERE user_id = ?", (user_id,))
+    conn.commit()
+
+
+def inv_next_item(conn, user_id: int):
+    """Pick the next item to verify: not verified during this session, highest price first."""
+    sess = inv_get(conn, user_id)
+    if not sess:
+        return None
+    started = sess["started_at"]
+    return conn.execute(
+        """
+        SELECT id, name, category, status, total_qty, available_qty, unit, location, price_rub, description, last_verified_at
+        FROM items
+        WHERE status NOT IN ('retired', 'wishlist')
+          AND (last_verified_at IS NULL OR last_verified_at = '' OR last_verified_at < ?)
+        ORDER BY price_rub DESC, name ASC
+        LIMIT 1
+        """,
+        (started,),
+    ).fetchone()
+
+
+def inv_mark_present(conn, item_id: str) -> None:
+    conn.execute(
+        "UPDATE items SET last_verified_at = ?, updated_at = ? WHERE id = ?",
+        (utc_now(), utc_now(), item_id),
+    )
+    conn.commit()
+
+
+def inv_mark_qty(conn, item_id: str, new_total: float) -> None:
+    """Set total to new_total, available_qty min'd to new_total to keep invariant."""
+    conn.execute(
+        "UPDATE items SET total_qty = ?, available_qty = MIN(available_qty, ?), "
+        "last_verified_at = ?, updated_at = ? WHERE id = ?",
+        (new_total, new_total, utc_now(), utc_now(), item_id),
+    )
+    conn.commit()
+
+
+def inv_mark_lost(conn, item_id: str) -> None:
+    conn.execute(
+        "UPDATE items SET total_qty = 0, available_qty = 0, status = 'lost', "
+        "last_verified_at = ?, updated_at = ? WHERE id = ?",
+        (utc_now(), utc_now(), item_id),
+    )
+    conn.commit()
+
+
 def list_items_with_sources(conn, limit: int = 200):
     """Items with the first source URL (preferring kind='purchase')."""
     return conn.execute(

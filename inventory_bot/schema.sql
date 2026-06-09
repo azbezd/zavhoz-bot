@@ -11,8 +11,21 @@ CREATE TABLE IF NOT EXISTS items (
   unit TEXT NOT NULL DEFAULT 'pcs',
   location TEXT NOT NULL DEFAULT 'unsorted',
   notes TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  price_rub REAL NOT NULL DEFAULT 0,
+  last_verified_at TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS inv_sessions (
+  user_id INTEGER PRIMARY KEY,
+  chat_id INTEGER NOT NULL,
+  started_at TEXT NOT NULL,
+  last_action_at TEXT NOT NULL,
+  seen INTEGER NOT NULL DEFAULT 0,
+  await_qty_for TEXT NOT NULL DEFAULT '',
+  last_prompt_message_id INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS item_tags (
