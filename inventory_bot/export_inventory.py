@@ -40,6 +40,9 @@ def export_items(repo_dir: str) -> None:
         out.append(f"    available_qty: {row['available_qty']:g}\n")
         out.append(f"    unit: {q(row['unit'])}\n")
         out.append(f"    location: {q(row['location'])}\n")
+        out.append(f"    price_rub: {row['price_rub']:g}\n")
+        out.append(f"    description: {q(row['description'])}\n")
+        out.append(f"    last_verified_at: {q(row['last_verified_at'])}\n")
         out.append("    purchase: null\n")
         out.append("    photos:\n")
         if photos:
