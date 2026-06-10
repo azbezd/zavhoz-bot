@@ -64,6 +64,9 @@ def _yaml_scalar(raw: str):
 
 
 def seed_projects(conn) -> None:
+    # Только первичное наполнение: удалённые пользователем проекты не воскрешаем.
+    if conn.execute("SELECT COUNT(*) AS c FROM projects").fetchone()["c"]:
+        return
     now = utc_now()
     defaults = [
         ("project-freenet", "FreeNet", "LTE-роутер на Pi Zero 2W + SIM7600"),
