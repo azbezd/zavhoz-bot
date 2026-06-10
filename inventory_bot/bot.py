@@ -503,7 +503,7 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
         for cat in order:
             items = groups[cat]
             label = CATEGORY_LABELS.get(cat, html_escape(cat))
-            out = [f"<b>{label}</b> · {len(items)}"]
+            lines = []
             for row in items:
                 name = html_escape(row["name"])
                 src_url = row["source_url"] if "source_url" in row.keys() else None
@@ -514,14 +514,28 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
                 qty = row["available_qty"]
                 total = row["total_qty"]
                 unit = _unit_ru(row["unit"])
-                if qty == total:
+                projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
+                if projects_csv:
+                    # Позиция живёт в проекте: физическое количество без дроби, проект подписан.
+                    qty_part = f"{total:g}{NBSP}{html_escape(unit)}"
+                elif qty == total:
                     qty_part = f"{qty:g}{NBSP}{html_escape(unit)}"
                 else:
-                    qty_part = f"{qty:g}/{total:g}{NBSP}{html_escape(unit)}"
-                projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
+                    qty_part = f"свободно{NBSP}{qty:g}{NBSP}из{NBSP}{total:g}{NBSP}{html_escape(unit)}"
                 proj_part = f"  ·  🔧{NBSP}{html_escape(projects_csv)}" if projects_csv else ""
-                out.append(f"• {name_part} — {qty_part}{proj_part}")
-            send_html(chat_id, "\n".join(out))
+                lines.append(f"• {name_part} — {qty_part}{proj_part}")
+            # Пункты — в цитатном блоке: переносы длинных строк остаются «внутри» блока.
+            buf, size, first = [], 0, True
+            for line in lines:
+                if size + len(line.encode("utf-8")) > 3000 and buf:
+                    head = f"<b>{label}</b> · {len(items)}" if first else f"<b>{label}</b> <i>(продолжение)</i>"
+                    send(chat_id, head + "\n<blockquote>" + "\n".join(buf) + "</blockquote>", parse_mode="HTML")
+                    buf, size, first = [], 0, False
+                buf.append(line)
+                size += len(line.encode("utf-8")) + 1
+            if buf:
+                head = f"<b>{label}</b> · {len(items)}" if first else f"<b>{label}</b> <i>(продолжение)</i>"
+                send(chat_id, head + "\n<blockquote>" + "\n".join(buf) + "</blockquote>", parse_mode="HTML")
     elif cmd == "/projects":
         _projects_overview(conn, chat_id)
     elif cmd == "/show" and len(parts) == 2:
@@ -735,12 +749,13 @@ def _projects_overview(conn, chat_id: int) -> None:
         desc = f" — <i>{html_escape(proj['description'])}</i>" if proj["description"] else ""
         lines.append(f"<b>{html_escape(proj['name'])}</b>{desc}")
         if items:
-            for it in items:
-                unit = _unit_ru(it["unit"])
-                lines.append(f"  • {html_escape(it['name'])} ×{it['qty']:g}{NBSP}{html_escape(unit)}")
+            body = "\n".join(
+                f"• {html_escape(it['name'])} ×{it['qty']:g}{NBSP}{html_escape(_unit_ru(it['unit']))}"
+                for it in items
+            )
+            lines.append(f"<blockquote>{body}</blockquote>")
         else:
-            lines.append("  <i>пока пусто</i>")
-        lines.append("")
+            lines.append("<blockquote><i>пока пусто</i></blockquote>")
         btn_row.append({"text": proj["name"], "callback_data": f"prj:show:{proj['id']}"})
         if len(btn_row) == 2:
             rows.append(btn_row)
@@ -760,14 +775,14 @@ def _project_card(conn, chat_id: int, project_id: str) -> None:
     lines = [f"<b>🛠 {html_escape(proj['name'])}</b>"]
     if proj["description"]:
         lines.append(f"<i>{html_escape(proj['description'])}</i>")
-    lines.append("")
     if items:
-        for it in items:
-            unit = _unit_ru(it["unit"])
-            lines.append(f"• {html_escape(it['name'])} ×{it['qty']:g}{NBSP}{html_escape(unit)}")
+        body = "\n".join(
+            f"• {html_escape(it['name'])} ×{it['qty']:g}{NBSP}{html_escape(_unit_ru(it['unit']))}"
+            for it in items
+        )
+        lines.append(f"<blockquote>{body}</blockquote>")
     else:
-        lines.append("<i>Деталей пока нет.</i>")
-    lines.append("")
+        lines.append("<blockquote><i>Деталей пока нет.</i></blockquote>")
     lines.append("Ответь на это сообщение текстом — обновлю описание проекта.")
     kb_rows = []
     if items:
