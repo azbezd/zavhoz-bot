@@ -532,13 +532,13 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
             for line in lines:
                 if size + len(line.encode("utf-8")) > 3000 and buf:
                     head = f"<b>{label}</b> · {len(items)}" if first else f"<b>{label}</b> <i>(продолжение)</i>"
-                    send(chat_id, head + "\n" + "".join(buf), parse_mode="HTML")
+                    send(chat_id, head + "\n" + "\n".join(buf), parse_mode="HTML")
                     buf, size, first = [], 0, False
                 buf.append(line)
                 size += len(line.encode("utf-8"))
             if buf:
                 head = f"<b>{label}</b> · {len(items)}" if first else f"<b>{label}</b> <i>(продолжение)</i>"
-                send(chat_id, head + "\n" + "".join(buf), parse_mode="HTML")
+                send(chat_id, head + "\n" + "\n".join(buf), parse_mode="HTML")
     elif cmd == "/projects":
         _projects_overview(conn, chat_id)
     elif cmd == "/show" and len(parts) == 2:
@@ -774,7 +774,7 @@ def _fmt_project_composition(items) -> list:
     lines = []
     for cat in order:
         label = CATEGORY_LABELS.get(cat, html_escape(cat or "—"))
-        body = "".join(
+        body = "\n".join(
             f"<blockquote>{html_escape(_typo(it['name']))}\n{_fmt_qty(it['qty'], it['unit'])}</blockquote>"
             for it in groups[cat]
         )
@@ -1554,7 +1554,7 @@ def _answer_stock_question(conn, chat_id: int, text: str) -> bool:
     lines = [f"Нашёл позиций: {len(sel)}"]
     if comment:
         lines[0] += f" — {html_escape(comment)}"
-    body = "".join(entries)
+    body = "\n".join(entries)
     tail = ""
     if len(sel) > 1 and len(units) == 1:
         tail = f"\nИтого: {_fmt_qty(total_sum, sel[0]['unit'])}"
