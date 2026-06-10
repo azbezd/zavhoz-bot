@@ -430,9 +430,19 @@ def format_proposal(proposal_id: int, proposal: dict) -> str:
         if op.get("question"):
             lines.append(f"   вопрос: {op.get('question')}")
     lines.append("")
-    lines.append(f"Если всё верно: /apply {proposal_id}")
-    lines.append(f"Если мимо: /discard {proposal_id}")
+    lines.append("Ответь на это сообщение текстом — поправлю черновик.")
     return "\n".join(lines)
+
+
+def _send_proposal(conn, chat_id: int, proposal_id: int, proposal: dict) -> None:
+    kb = {"inline_keyboard": [[
+        {"text": "✅ Применить", "callback_data": f"prop:yes:{proposal_id}"},
+        {"text": "🗑 Отменить", "callback_data": f"prop:no:{proposal_id}"},
+    ]]}
+    msg_id = send_with_keyboard(chat_id, html_escape(format_proposal(proposal_id, proposal)), kb)
+    if msg_id:
+        conn.execute("UPDATE proposals SET draft_message_id = ? WHERE id = ?", (msg_id, proposal_id))
+        conn.commit()
 
 
 def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
@@ -445,16 +455,13 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
             "Я на связи. Я Завхоз: могу вести склад железок, разбирать фото заказов, "
             "помнить где что лежит и помогать по проектам.\n\n"
             "Пиши обычным языком: «купил 10 резисторов 220 Ом», «это ушло в FreeNetBox», "
-            "«что у меня есть для ESP32?». Если я собираюсь менять склад, сначала дам черновик, "
-            "а ты подтвердишь через /apply.\n\n"
-            "Команды:\n"
-            "/list — склад по категориям\n"
-            "/inv — инвентаризация (продолжает, если уже идёт)\n"
-            "/skipped — вернуться к пропущенным позициям\n"
-            "/stop_inv — завершить инвентаризацию со сводкой\n"
-            "/projects — проекты\n"
-            "/pending — черновики изменений\n"
-            "/export — экспорт склада в Git"
+            "«что у меня есть для ESP32?». Изменения склада сначала приходят черновиком "
+            "с кнопками Применить/Отменить; ответом на черновик можно его поправить.\n\n"
+            "📋 /list — склад по группам (нули и списанное скрыты, проектное — с пометкой)\n"
+            "🔍 /inv — инвентаризация: всё управление кнопками (пропустить, к пропущенным, завершить)\n"
+            "✏️ /edit — точечно изменить позицию из списка\n"
+            "🛠 /projects — проекты\n\n"
+            "Экспорт склада в GitHub — автоматический после любых изменений."
         )
         send(chat_id, msg)
         remember_chat(conn, user_id, "assistant", msg)
@@ -501,7 +508,9 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
                     qty_part = f"{qty:g}{NBSP}{html_escape(unit)}"
                 else:
                     qty_part = f"{qty:g}/{total:g}{NBSP}{html_escape(unit)}"
-                out.append(f"• {name_part} — {qty_part}")
+                projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
+                proj_part = f"  ·  🔧{NBSP}{html_escape(projects_csv)}" if projects_csv else ""
+                out.append(f"• {name_part} — {qty_part}{proj_part}")
             send_html(chat_id, "\n".join(out))
     elif cmd == "/projects":
         rows = list_projects(conn)
@@ -837,6 +846,12 @@ def _inv_advance(conn, chat_id: int, user_id: int) -> None:
     sess = inv_get(conn, user_id)
     if sess and sess["mode"] == "pick":
         inv_finish(conn, user_id)
+        repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
+        try:
+            export_items(repo_dir)
+            maybe_git_sync(repo_dir, "item edited via /edit")
+        except Exception as exc:
+            print(f"pick export error: {exc}", flush=True)
         send(chat_id, "Готово. Изменить ещё позицию — /edit.")
         return
     if _inv_show_current(conn, chat_id, user_id):
@@ -926,6 +941,32 @@ def handle_callback_query(conn, callback: dict) -> None:
     allowed = allowed_user_ids()
     if allowed and user_id not in allowed:
         answer_callback(cb_id)
+        return
+
+    if data.startswith("prop:"):
+        try:
+            _, prop_act, prop_id_s = data.split(":")
+            prop_id = int(prop_id_s)
+        except ValueError:
+            answer_callback(cb_id)
+            return
+        msg_id = msg.get("message_id")
+        if msg_id:
+            edit_reply_markup(chat_id, int(msg_id), None)
+        repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
+        if prop_act == "yes":
+            answer_callback(cb_id, "Применяю")
+            try:
+                result = apply_proposal(conn, prop_id)
+                export_items(repo_dir)
+                maybe_git_sync(repo_dir, f"apply telegram proposal {prop_id}")
+                send(chat_id, "Готово, внёс в склад:\n" + json.dumps(result, ensure_ascii=False, indent=2))
+            except Exception as exc:
+                send(chat_id, f"Не получилось применить черновик #{prop_id}: {exc}")
+        else:
+            answer_callback(cb_id, "Отменил")
+            discard_proposal(conn, prop_id)
+            send(chat_id, f"Черновик #{prop_id} выкинул.")
         return
 
     if data.startswith("lay:"):
@@ -1562,6 +1603,26 @@ def handle_message(conn, message: dict) -> None:
 
     text = message.get("text") or message.get("caption") or ""
 
+    # Ответ (reply) на сообщение-черновик = правка черновика: пересобираем с уточнением.
+    reply_to = message.get("reply_to_message") or {}
+    if text and not text.startswith("/") and reply_to.get("message_id"):
+        row = conn.execute(
+            "SELECT id, message_text FROM proposals WHERE draft_message_id = ? AND status = 'pending'",
+            (int(reply_to["message_id"]),),
+        ).fetchone()
+        if row:
+            send_chat_action(chat_id, "typing")
+            combined = (row["message_text"] or "") + "\n\nУточнение от пользователя: " + text
+            try:
+                proposal = extract_inventory_proposal(combined, [])
+            except Exception as exc:
+                send(chat_id, f"Уточнение принял, но пересобрать черновик не вышло: {exc}")
+                return
+            discard_proposal(conn, row["id"])
+            new_id = save_proposal(conn, user_id, chat_id, combined, [], proposal)
+            _send_proposal(conn, chat_id, new_id, proposal)
+            return
+
     # Активная раскладка устройств: текст = уточнение к текущему пункту.
     lay_queue, lay_pos = layout_get(conn, user_id)
     if lay_queue is not None and text and not text.startswith("/"):
@@ -1623,17 +1684,16 @@ def handle_message(conn, message: dict) -> None:
         try:
             proposal = extract_inventory_proposal(text, [os.path.join(repo_dir, path) for path in photo_paths])
             proposal_id = save_proposal(conn, user_id, chat_id, text, photo_paths, proposal)
-            reply = format_proposal(proposal_id, proposal)
+            remember_chat(conn, user_id, "assistant", format_proposal(proposal_id, proposal))
+            _send_proposal(conn, chat_id, proposal_id, proposal)
         except Exception as exc:
             reply = (
                 "Я принял сообщение, но AI-разбор сейчас не сработал.\n"
-                f"Причина: {exc}\n\n"
-                "Фото/текст можно разобрать позже, когда настроим AI-доступ с поддерживаемого региона."
+                f"Причина: {exc}"
             )
-        print(f"step: inventory reply ready len={len(reply)}", flush=True)
-        remember_chat(conn, user_id, "assistant", reply)
-        send(chat_id, reply)
-        print(f"step: inventory sent", flush=True)
+            remember_chat(conn, user_id, "assistant", reply)
+            send(chat_id, reply)
+        print(f"step: inventory draft sent", flush=True)
     else:
         print(f"step: route=chat, streaming openai", flush=True)
         reply = _chat_with_stream(conn, chat_id, user_id, text)
@@ -1645,14 +1705,10 @@ def set_my_commands() -> None:
     """Register the command menu so Telegram shows hints instead of manual typing."""
     commands = [
         {"command": "list", "description": "📋 Склад по категориям"},
-        {"command": "inv", "description": "🔍 Инвентаризация (старт/продолжить)"},
-        {"command": "edit", "description": "✏️ Изменить позицию (выбор из списка)"},
-        {"command": "skipped", "description": "↩️ К пропущенным позициям"},
-        {"command": "stop_inv", "description": "⏹ Завершить инвентаризацию"},
+        {"command": "inv", "description": "🔍 Инвентаризация (управление кнопками внутри)"},
+        {"command": "edit", "description": "✏️ Изменить позицию"},
         {"command": "projects", "description": "🛠 Проекты"},
-        {"command": "pending", "description": "📝 Черновики изменений"},
-        {"command": "export", "description": "💾 Экспорт склада в Git"},
-        {"command": "start", "description": "ℹ️ Что умеет бот"},
+        {"command": "start", "description": "ℹ️ Справка"},
     ]
     try:
         telegram("setMyCommands", {"commands": json.dumps(commands, ensure_ascii=False)})

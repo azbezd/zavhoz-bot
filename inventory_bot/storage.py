@@ -23,6 +23,9 @@ def connect() -> sqlite3.Connection:
 def _migrate(conn) -> None:
     """Add columns missing from tables created by older schema versions."""
     wanted = {
+        "proposals": [
+            ("draft_message_id", "INTEGER NOT NULL DEFAULT 0"),
+        ],
         "inv_sessions": [
             ("pass_no", "INTEGER NOT NULL DEFAULT 1"),
             ("skipped_json", "TEXT NOT NULL DEFAULT '[]'"),
@@ -611,9 +614,11 @@ def list_items_with_sources(conn, limit: int = 200):
             (SELECT s.title FROM item_sources s
              WHERE s.item_id = i.id
              ORDER BY CASE s.kind WHEN 'purchase' THEN 0 ELSE 1 END, s.rowid
-             LIMIT 1) AS source_title
+             LIMIT 1) AS source_title,
+            (SELECT group_concat(p.name, ', ') FROM item_usage u JOIN projects p ON p.id = u.project_id
+             WHERE u.item_id = i.id) AS projects_csv
         FROM items i
-        WHERE i.status != 'retired'
+        WHERE i.status != 'retired' AND (i.total_qty > 0 OR i.status = 'in_use')
         ORDER BY i.category, i.name
         LIMIT ?
         """,
