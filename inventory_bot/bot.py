@@ -509,7 +509,7 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
             label = CATEGORY_LABELS.get(cat, html_escape(cat))
             lines = []
             for row in items:
-                name = html_escape(row["name"])
+                name = html_escape(_typo(row["name"]))
                 src_url = row["source_url"] if "source_url" in row.keys() else None
                 if src_url:
                     name_part = f'<a href="{html_escape(src_url)}">{name}</a>'
@@ -517,29 +517,28 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
                     name_part = name
                 qty = row["available_qty"]
                 total = row["total_qty"]
-                unit = _unit_ru(row["unit"])
                 projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
                 if projects_csv:
                     # Позиция живёт в проекте: физическое количество без дроби, проект подписан.
-                    qty_part = f"{total:g}{NBSP}{html_escape(unit)}"
+                    qty_part = _fmt_qty(total, row["unit"])
                 elif qty == total:
-                    qty_part = f"{qty:g}{NBSP}{html_escape(unit)}"
+                    qty_part = _fmt_qty(qty, row["unit"])
                 else:
-                    qty_part = f"свободно{NBSP}{qty:g}{NBSP}из{NBSP}{total:g}{NBSP}{html_escape(unit)}"
+                    qty_part = f"свободно{NBSP}{_fmt_qty(qty, row['unit'])}{NBSP}из{NBSP}{_fmt_qty(total, row['unit'])}"
                 proj_part = f"  ·  🔧{NBSP}{html_escape(projects_csv)}" if projects_csv else ""
-                lines.append(f"• {name_part} — {qty_part}{proj_part}")
-            # Пункты — в цитатном блоке: переносы длинных строк остаются «внутри» блока.
+                # Позиция = отдельная цитата: имя строкой, количество строкой ниже.
+                lines.append(f"<blockquote>{name_part}\n{qty_part}{proj_part}</blockquote>")
             buf, size, first = [], 0, True
             for line in lines:
                 if size + len(line.encode("utf-8")) > 3000 and buf:
                     head = f"<b>{label}</b> · {len(items)}" if first else f"<b>{label}</b> <i>(продолжение)</i>"
-                    send(chat_id, head + "\n<blockquote>" + "\n".join(buf) + "</blockquote>", parse_mode="HTML")
+                    send(chat_id, head + "\n" + "".join(buf), parse_mode="HTML")
                     buf, size, first = [], 0, False
                 buf.append(line)
-                size += len(line.encode("utf-8")) + 1
+                size += len(line.encode("utf-8"))
             if buf:
                 head = f"<b>{label}</b> · {len(items)}" if first else f"<b>{label}</b> <i>(продолжение)</i>"
-                send(chat_id, head + "\n<blockquote>" + "\n".join(buf) + "</blockquote>", parse_mode="HTML")
+                send(chat_id, head + "\n" + "".join(buf), parse_mode="HTML")
     elif cmd == "/projects":
         _projects_overview(conn, chat_id)
     elif cmd == "/show" and len(parts) == 2:
@@ -677,6 +676,29 @@ NBSP = "\u00a0"  # неразрывный пробел
 
 UNIT_LABELS = {"pcs": "шт", "m": "м", "meters": "м", "mm": "мм", "cm": "см", "g": "г", "kg": "кг"}
 
+# Короткие предлоги/союзы: сшиваются со следующим словом неразрывным пробелом.
+_TYPO_SMALL = ("в|во|без|до|из|к|на|по|о|об|обо|от|ото|с|со|у|за|над|под|про|при|"
+               "и|а|но|да|или|же|ли|бы|не|ни|для")
+_TYPO_RE = re.compile(r"(?:(?<=[\s(«\"])|^)(" + _TYPO_SMALL + r")[ ]+", re.IGNORECASE)
+
+
+def _typo(text: str) -> str:
+    """Лёгкая типографика отображаемых строк: предлоги и последнее слово не отрываются.
+    К данным в БД не применяется — только к выводу."""
+    if not text:
+        return text
+    t = _TYPO_RE.sub(lambda m: m.group(1) + NBSP, text)
+    head, sep, tail = t.rpartition(" ")
+    if sep and len(tail) <= 12:
+        t = head + NBSP + tail
+    return t
+
+
+def _fmt_qty(qty, unit: str) -> str:
+    """Число с десятичной запятой + единица через NBSP: «1,5 м», «10 шт»."""
+    num = f"{qty:g}".replace(".", ",")
+    return f"{num}{NBSP}{_unit_ru(unit)}"
+
 
 def _unit_ru(unit: str) -> str:
     return UNIT_LABELS.get((unit or "pcs").lower(), unit or "шт")
@@ -752,11 +774,11 @@ def _fmt_project_composition(items) -> list:
     lines = []
     for cat in order:
         label = CATEGORY_LABELS.get(cat, html_escape(cat or "—"))
-        body = "\n".join(
-            f"• {html_escape(it['name'])} ×{it['qty']:g}{NBSP}{html_escape(_unit_ru(it['unit']))}"
+        body = "".join(
+            f"<blockquote>{html_escape(_typo(it['name']))}\n{_fmt_qty(it['qty'], it['unit'])}</blockquote>"
             for it in groups[cat]
         )
-        lines.append(f"{label}\n<blockquote>{body}</blockquote>")
+        lines.append(f"{label}\n{body}")
     return lines
 
 
