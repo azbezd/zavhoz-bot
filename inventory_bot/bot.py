@@ -1516,7 +1516,7 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         done, total_count = inv_progress(conn, user_id)
         send(chat_id, f"Поставил на паузу: проверено {done} из {total_count}. Продолжить — /inv.")
     elif action == "note":
-        send(chat_id, f"📝 Записал заметку к «{name}». Карточка ждёт ответа.")
+        send(chat_id, f"📝 Записал заметку к «{name}». Жду ответ по наличию — кнопкой или словом («есть», «нет», «осталось 2»).")
     else:
         send(chat_id, "Не понял. Нажми кнопку под карточкой или напиши число/«есть»/«нет».")
 
@@ -1884,14 +1884,28 @@ def handle_message(conn, message: dict) -> None:
         if item:
             repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
             best = sorted(message["photo"], key=lambda p: p.get("file_size", 0))[-1]
+            caption = (text or "").strip()
+            # «замени/замени картинку/замени фото» в подписи = заменить, иначе добавить.
+            replace = bool(re.search(r"\bзамен", caption.lower()))
+            note = "" if (not caption or replace) else caption
             try:
                 rel = download_file(best["file_id"], os.path.join(repo_dir, "photos"))
-                item_add_photo(conn, item["id"], rel)
-                if text:
-                    item_append_note(conn, item["id"], text)
-                send(chat_id, f"📷 Прикрепил фото к «{item['name']}»."
-                              + (" Заметку записал." if text else "")
-                              + " Карточка ждёт ответа.")
+                if replace:
+                    item_set_photo(conn, item["id"], rel)
+                    verb = "Заменил фото"
+                else:
+                    item_add_photo(conn, item["id"], rel)
+                    verb = "Добавил фото к"
+                if note:
+                    item_append_note(conn, item["id"], note)
+                try:
+                    export_items(repo_dir)
+                    maybe_git_sync(repo_dir, "photo for " + item["id"])
+                except Exception as exc2:
+                    print(f"photo export error: {exc2}", flush=True)
+                send(chat_id, f"📷 {verb} «{item['name']}»." + (" Заметку записал." if note else ""))
+                # Покажем обновлённую карточку, чтобы было видно результат и кнопки.
+                _inv_show_item(conn, chat_id, user_id, get_item(conn, item["id"]))
             except Exception as exc:
                 send(chat_id, f"Фото не сохранилось: {exc}")
             return
@@ -1951,7 +1965,7 @@ def set_my_commands() -> None:
     """Register the command menu so Telegram shows hints instead of manual typing."""
     commands = [
         {"command": "list", "description": "📋 Склад по категориям"},
-        {"command": "inv", "description": "🔍 Инвентаризация (управление кнопками внутри)"},
+        {"command": "inv", "description": "🔍 Инвентаризация"},
         {"command": "edit", "description": "✏️ Изменить позицию"},
         {"command": "projects", "description": "🛠 Проекты"},
         {"command": "start", "description": "ℹ️ Справка"},

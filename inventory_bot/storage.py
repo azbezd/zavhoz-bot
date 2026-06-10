@@ -654,6 +654,13 @@ def item_set_in_project(conn, item_id: str, project_id: str) -> None:
     conn.commit()
 
 
+def item_set_photo(conn, item_id: str, path: str) -> None:
+    """Заменить все фото позиции одним новым."""
+    conn.execute("DELETE FROM item_photos WHERE item_id = ?", (item_id,))
+    conn.execute("INSERT OR IGNORE INTO item_photos (item_id, path) VALUES (?, ?)", (item_id, path))
+    conn.commit()
+
+
 def item_add_photo(conn, item_id: str, path: str) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO item_photos (item_id, path) VALUES (?, ?)",
