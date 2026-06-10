@@ -26,6 +26,9 @@ def _migrate(conn) -> None:
         "proposals": [
             ("draft_message_id", "INTEGER NOT NULL DEFAULT 0"),
         ],
+        "projects": [
+            ("desc_msg_id", "INTEGER NOT NULL DEFAULT 0"),
+        ],
         "inv_sessions": [
             ("pass_no", "INTEGER NOT NULL DEFAULT 1"),
             ("skipped_json", "TEXT NOT NULL DEFAULT '[]'"),
@@ -63,11 +66,11 @@ def _yaml_scalar(raw: str):
 def seed_projects(conn) -> None:
     now = utc_now()
     defaults = [
-        ("project-freenet", "FreeNet", "Pi Zero 2W / SIM7600 LTE-router and portal work tracked in the Git repository."),
-        ("project-freenetbox", "FreeNetBox", "Pi 5 based router boxes, portal, firmware and network appliance work tracked in Git."),
-        ("project-netbox", "NetBox", "Pi 3B+ based network box tracked in Git."),
-        ("project-dachanetbox", "DachaNetBox", "Pi based router box installed at the dacha."),
-        ("project-ideas-lab", "Ideas Lab", "Temporary bucket for experiments that are not a named project yet."),
+        ("project-freenet", "FreeNet", "LTE-роутер на Pi Zero 2W + SIM7600"),
+        ("project-freenetbox", "FreeNetBox", "Роутер на Pi 5, алюминиевый корпус"),
+        ("project-netbox", "NetBox", "Роутер на Pi 3B+"),
+        ("project-dachanetbox", "DachaNetBox", "Роутер на даче, Pi 3B+"),
+        ("project-ideas-lab", "Ideas Lab", "Эксперименты без отдельного проекта"),
     ]
     for project_id, name, description in defaults:
         conn.execute(
@@ -562,6 +565,44 @@ def find_item_by_words(conn, search: str):
 
 def get_project(conn, project_id: str):
     return conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+
+
+def project_items(conn, project_id: str):
+    return conn.execute(
+        "SELECT i.id, i.name, i.unit, u.qty FROM item_usage u JOIN items i ON i.id = u.item_id "
+        "WHERE u.project_id = ? AND i.status != 'retired' ORDER BY i.name",
+        (project_id,),
+    ).fetchall()
+
+
+def project_remove_item(conn, project_id: str, item_id: str) -> None:
+    """Вынуть деталь из проекта: позиция становится свободной."""
+    now = utc_now()
+    conn.execute("DELETE FROM item_usage WHERE project_id = ? AND item_id = ?", (project_id, item_id))
+    left = conn.execute("SELECT COUNT(*) AS c FROM item_usage WHERE item_id = ?", (item_id,)).fetchone()["c"]
+    if not left:
+        conn.execute(
+            "UPDATE items SET status = 'stock', available_qty = total_qty, updated_at = ? WHERE id = ?",
+            (now, item_id),
+        )
+    conn.commit()
+
+
+def project_set_desc(conn, project_id: str, text: str) -> None:
+    conn.execute(
+        "UPDATE projects SET description = ?, updated_at = ? WHERE id = ?",
+        (text.strip(), utc_now(), project_id),
+    )
+    conn.commit()
+
+
+def project_set_desc_msg(conn, project_id: str, msg_id: int) -> None:
+    conn.execute("UPDATE projects SET desc_msg_id = ? WHERE id = ?", (msg_id, project_id))
+    conn.commit()
+
+
+def project_by_desc_msg(conn, msg_id: int):
+    return conn.execute("SELECT * FROM projects WHERE desc_msg_id = ?", (msg_id,)).fetchone()
 
 
 def item_set_in_project(conn, item_id: str, project_id: str) -> None:

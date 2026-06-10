@@ -72,6 +72,11 @@ try:
         item_append_note,
         item_projects,
         item_retire,
+        project_by_desc_msg,
+        project_items,
+        project_remove_item,
+        project_set_desc,
+        project_set_desc_msg,
         item_set_category,
         item_set_in_project,
         item_split_to_project,
@@ -135,6 +140,11 @@ except ImportError:
         item_append_note,
         item_projects,
         item_retire,
+        project_by_desc_msg,
+        project_items,
+        project_remove_item,
+        project_set_desc,
+        project_set_desc_msg,
         item_set_category,
         item_set_in_project,
         item_split_to_project,
@@ -513,14 +523,7 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
                 out.append(f"• {name_part} — {qty_part}{proj_part}")
             send_html(chat_id, "\n".join(out))
     elif cmd == "/projects":
-        rows = list_projects(conn)
-        if not rows:
-            send(chat_id, "Проекты пока не заведены.")
-            return
-        lines = ["Проекты:"]
-        for row in rows:
-            lines.append(f"{row['id']} | {row['name']} | {row['status']} — {row['description']}")
-        send(chat_id, "\n".join(lines))
+        _projects_overview(conn, chat_id)
     elif cmd == "/show" and len(parts) == 2:
         row = get_proposal(conn, int(parts[1]))
         if not row:
@@ -718,6 +721,75 @@ def _inv_show_project_picker(conn, chat_id: int, item) -> None:
         rows.append(row)
     rows.append([{"text": "↩️ Отмена", "callback_data": "inv:pcancel:_"}])
     send_with_keyboard(chat_id, f"Где используется «{html_escape(item['name'])}»?", {"inline_keyboard": rows})
+
+
+def _projects_overview(conn, chat_id: int) -> None:
+    projects = list_projects(conn)
+    if not projects:
+        send(chat_id, "Проекты пока не заведены.")
+        return
+    lines = ["<b>🛠 Проекты</b>", ""]
+    btn_row, rows = [], []
+    for proj in projects:
+        items = project_items(conn, proj["id"])
+        desc = f" — <i>{html_escape(proj['description'])}</i>" if proj["description"] else ""
+        lines.append(f"<b>{html_escape(proj['name'])}</b>{desc}")
+        if items:
+            for it in items:
+                unit = _unit_ru(it["unit"])
+                lines.append(f"  • {html_escape(it['name'])} ×{it['qty']:g}{NBSP}{html_escape(unit)}")
+        else:
+            lines.append("  <i>пока пусто</i>")
+        lines.append("")
+        btn_row.append({"text": proj["name"], "callback_data": f"prj:show:{proj['id']}"})
+        if len(btn_row) == 2:
+            rows.append(btn_row)
+            btn_row = []
+    if btn_row:
+        rows.append(btn_row)
+    lines.append("Кнопкой ниже можно открыть проект и поправить его.")
+    send_with_keyboard(chat_id, "\n".join(lines).strip(), {"inline_keyboard": rows})
+
+
+def _project_card(conn, chat_id: int, project_id: str) -> None:
+    proj = get_project(conn, project_id)
+    if not proj:
+        send(chat_id, "Проект не нашёл.")
+        return
+    items = project_items(conn, project_id)
+    lines = [f"<b>🛠 {html_escape(proj['name'])}</b>"]
+    if proj["description"]:
+        lines.append(f"<i>{html_escape(proj['description'])}</i>")
+    lines.append("")
+    if items:
+        for it in items:
+            unit = _unit_ru(it["unit"])
+            lines.append(f"• {html_escape(it['name'])} ×{it['qty']:g}{NBSP}{html_escape(unit)}")
+    else:
+        lines.append("<i>Деталей пока нет.</i>")
+    lines.append("")
+    lines.append("Ответь на это сообщение текстом — обновлю описание проекта.")
+    kb_rows = []
+    if items:
+        kb_rows.append([{"text": "➖ Вынуть деталь", "callback_data": f"prj:out:{project_id}"}])
+    kb_rows.append([{"text": "↩️ Все проекты", "callback_data": "prj:list:_"}])
+    msg_id = send_with_keyboard(chat_id, "\n".join(lines), {"inline_keyboard": kb_rows})
+    if msg_id:
+        project_set_desc_msg(conn, project_id, msg_id)
+
+
+def _project_out_menu(conn, chat_id: int, project_id: str) -> None:
+    proj = get_project(conn, project_id)
+    items = project_items(conn, project_id)
+    if not proj or not items:
+        send(chat_id, "Вынимать нечего.")
+        return
+    rows = []
+    for it in items[:30]:
+        rows.append([{"text": f"{it['name'][:40]} ×{it['qty']:g}", "callback_data": f"prj:rm:{project_id}:{it['id']}"}])
+    rows.append([{"text": "↩️ Отмена", "callback_data": f"prj:show:{project_id}"}])
+    send_with_keyboard(chat_id, f"Что вынуть из «{html_escape(proj['name'])}»? Деталь станет свободной на складе.",
+                       {"inline_keyboard": rows})
 
 
 def _pick_show_categories(conn, chat_id: int) -> None:
@@ -941,6 +1013,33 @@ def handle_callback_query(conn, callback: dict) -> None:
     allowed = allowed_user_ids()
     if allowed and user_id not in allowed:
         answer_callback(cb_id)
+        return
+
+    if data.startswith("prj:"):
+        answer_callback(cb_id)
+        prj_rest = data[4:]
+        if prj_rest == "list:_":
+            _projects_overview(conn, chat_id)
+        elif prj_rest.startswith("show:"):
+            _project_card(conn, chat_id, prj_rest[5:])
+        elif prj_rest.startswith("out:"):
+            _project_out_menu(conn, chat_id, prj_rest[4:])
+        elif prj_rest.startswith("rm:"):
+            proj_id, _, iid = prj_rest[3:].partition(":")
+            item = get_item(conn, iid)
+            proj = get_project(conn, proj_id)
+            if item and proj:
+                project_remove_item(conn, proj_id, iid)
+                repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
+                try:
+                    export_items(repo_dir)
+                    maybe_git_sync(repo_dir, f"removed {iid} from {proj_id}")
+                except Exception as exc:
+                    print(f"prj export error: {exc}", flush=True)
+                send(chat_id, f"➖ «{item['name']}» вынул из {proj['name']} — снова свободная.")
+                _project_card(conn, chat_id, proj_id)
+            else:
+                send(chat_id, "Не нашёл позицию или проект.")
         return
 
     if data.startswith("prop:"):
@@ -1603,8 +1702,16 @@ def handle_message(conn, message: dict) -> None:
 
     text = message.get("text") or message.get("caption") or ""
 
-    # Ответ (reply) на сообщение-черновик = правка черновика: пересобираем с уточнением.
+    # Ответ (reply) на карточку проекта = новое описание проекта.
     reply_to = message.get("reply_to_message") or {}
+    if text and not text.startswith("/") and reply_to.get("message_id"):
+        proj_row = project_by_desc_msg(conn, int(reply_to["message_id"]))
+        if proj_row:
+            project_set_desc(conn, proj_row["id"], text)
+            send(chat_id, f"✏️ Описание «{proj_row['name']}» обновил: {text.strip()}")
+            return
+
+    # Ответ (reply) на сообщение-черновик = правка черновика: пересобираем с уточнением.
     if text and not text.startswith("/") and reply_to.get("message_id"):
         row = conn.execute(
             "SELECT id, message_text FROM proposals WHERE draft_message_id = ? AND status = 'pending'",
