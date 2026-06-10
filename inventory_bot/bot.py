@@ -28,7 +28,7 @@ socket.getaddrinfo = _ipv6_first_getaddrinfo
 try:
     from .export_inventory import export_items, maybe_git_sync
     from .openai_chat import chat_reply, chat_reply_stream, classify_inv_intent
-    from .openai_extract import extract_inventory_proposal
+    from .openai_extract import extract_device_layout, extract_inventory_proposal
     from .storage import (
         apply_proposal,
         categories_with_counts,
@@ -61,6 +61,13 @@ try:
         inv_skipped,
         inv_start,
         item_add_photo,
+        find_item_by_words,
+        layout_clear,
+        layout_get,
+        layout_save_queue,
+        layout_set,
+        next_item_id,
+        utc_now,
         items_in_category,
         item_append_note,
         item_projects,
@@ -84,7 +91,7 @@ try:
 except ImportError:
     from export_inventory import export_items, maybe_git_sync
     from openai_chat import chat_reply, chat_reply_stream, classify_inv_intent
-    from openai_extract import extract_inventory_proposal
+    from openai_extract import extract_device_layout, extract_inventory_proposal
     from storage import (
         apply_proposal,
         categories_with_counts,
@@ -117,6 +124,13 @@ except ImportError:
         inv_skipped,
         inv_start,
         item_add_photo,
+        find_item_by_words,
+        layout_clear,
+        layout_get,
+        layout_save_queue,
+        layout_set,
+        next_item_id,
+        utc_now,
         items_in_category,
         item_append_note,
         item_projects,
@@ -918,6 +932,28 @@ def handle_callback_query(conn, callback: dict) -> None:
         answer_callback(cb_id)
         return
 
+    if data.startswith("lay:"):
+        lay_action = data.split(":")[1] if ":" in data else ""
+        msg_id = msg.get("message_id")
+        if msg_id:
+            edit_reply_markup(chat_id, int(msg_id), None)
+        if lay_action == "yes":
+            answer_callback(cb_id, "Применяю")
+            _layout_apply_current(conn, chat_id, user_id)
+        elif lay_action == "skip":
+            answer_callback(cb_id, "Пропустил")
+            queue, pos = layout_get(conn, user_id)
+            if queue is not None:
+                layout_save_queue(conn, user_id, queue, pos + 1)
+                _layout_show_next(conn, chat_id, user_id)
+        elif lay_action == "stop":
+            answer_callback(cb_id, "Остановил")
+            layout_clear(conn, user_id)
+            send(chat_id, "Раскладку остановил. Можно прислать описание заново в любой момент.")
+        else:
+            answer_callback(cb_id)
+        return
+
     if data.startswith("pick:"):
         answer_callback(cb_id)
         rest = data[5:]
@@ -1273,6 +1309,132 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         send(chat_id, "Не понял. Нажми кнопку под карточкой или напиши число/«есть»/«нет».")
 
 
+def _looks_like_device_layout(conn, text: str) -> bool:
+    """Описание устройств с деталями: упомянуты проекты, это не вопрос."""
+    if "?" in text:
+        return False
+    lowered = text.lower()
+    hits = sum(1 for p in list_projects(conn) if p["name"].lower() in lowered)
+    return hits >= 2 or (hits >= 1 and len(text) > 80)
+
+
+def _layout_start(conn, chat_id: int, user_id: int, text: str) -> None:
+    send_chat_action(chat_id, "typing")
+    project_names = [p["name"] for p in list_projects(conn)]
+    try:
+        items = extract_device_layout(text, project_names)
+    except Exception as exc:
+        print(f"layout extract error: {exc}", flush=True)
+        send(chat_id, f"Не смог разобрать описание устройств: {exc}")
+        return
+    if not items:
+        send(chat_id, "Не нашёл в тексте деталей для раскладки.")
+        return
+    queue = []
+    for it in items:
+        match = find_item_by_words(conn, it.get("search") or it.get("name", ""))
+        queue.append({
+            "project": it.get("project", ""),
+            "name": it.get("name", "?"),
+            "qty": float(it.get("qty") or 1),
+            "uncertain": bool(it.get("uncertain")),
+            "note": it.get("note", ""),
+            "matched_id": match["id"] if match else "",
+            "matched_name": match["name"] if match else "",
+        })
+    layout_set(conn, user_id, queue)
+    send(chat_id, f"Разобрал описание: {len(queue)} пунктов. Пройдём по одному — подтверждай.")
+    _layout_show_next(conn, chat_id, user_id)
+
+
+def _layout_show_next(conn, chat_id: int, user_id: int) -> None:
+    queue, pos = layout_get(conn, user_id)
+    if queue is None:
+        return
+    if pos >= len(queue):
+        applied = sum(1 for e in queue if e.get("done") == "yes")
+        created = sum(1 for e in queue if e.get("created"))
+        skipped = len(queue) - applied
+        layout_clear(conn, user_id)
+        repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
+        synced = ""
+        if applied:
+            try:
+                export_items(repo_dir)
+                maybe_git_sync(repo_dir, "device layout via telegram")
+                if os.environ.get("INVENTORY_AUTO_GIT", "0") == "1":
+                    synced = " Изменения выгружены в GitHub."
+            except Exception as exc:
+                print(f"layout export error: {exc}", flush=True)
+        send(chat_id, f"Раскладка готова: применено {applied}, из них создано новых {created}, пропущено {skipped}.{synced}")
+        return
+    entry = queue[pos]
+    proj_part = f" → {entry['project']}" if entry["project"] else " (без проекта, останется свободной)"
+    lines = [f"<i>Пункт {pos + 1}{NBSP}из{NBSP}{len(queue)}</i>",
+             f"<b>{html_escape(entry['name'])}</b> ×{entry['qty']:g}{html_escape(proj_part)}"]
+    if entry.get("note"):
+        lines.append(f"📝 {html_escape(entry['note'])}")
+    if entry.get("user_note"):
+        lines.append(f"💬 {html_escape(entry['user_note'])}")
+    if entry["matched_id"]:
+        lines.append(f"Нашёл в базе: «{html_escape(entry['matched_name'])}» — привяжу её.")
+    else:
+        lines.append("В базе не нашёл — создам как неуточнённую позицию.")
+    kb = {"inline_keyboard": [[
+        {"text": "✅ Да", "callback_data": "lay:yes:_"},
+        {"text": "⏭ Пропустить", "callback_data": "lay:skip:_"},
+        {"text": "⏹ Стоп", "callback_data": "lay:stop:_"},
+    ]]}
+    send_with_keyboard(chat_id, "\n".join(lines), kb)
+
+
+def _layout_apply_current(conn, chat_id: int, user_id: int) -> None:
+    queue, pos = layout_get(conn, user_id)
+    if queue is None or pos >= len(queue):
+        return
+    entry = queue[pos]
+    proj = _resolve_project(conn, entry["project"]) if entry["project"] else None
+    extra = " ".join(filter(None, [entry.get("note"), entry.get("user_note")]))
+    note_text = (("[неуточнённое] " if entry["uncertain"] else "") + extra).strip()
+    if entry["matched_id"]:
+        item = get_item(conn, entry["matched_id"])
+        if item:
+            if note_text:
+                item_append_note(conn, item["id"], note_text)
+            if proj:
+                if entry["qty"] < (item["total_qty"] or 0):
+                    item_split_to_project(conn, item["id"], entry["qty"], proj["id"])
+                else:
+                    item_set_in_project(conn, item["id"], proj["id"])
+                send(chat_id, f"🔧 «{item['name']}» → {proj['name']}.")
+            else:
+                send(chat_id, f"📝 «{item['name']}» — оставил свободной, заметку записал.")
+    else:
+        new_id = next_item_id(conn)
+        now = utc_now()
+        status = "in_use" if proj else "stock"
+        available = 0 if proj else entry["qty"]
+        verified = now if proj else ""
+        notes = ("[неуточнённое из описания] " + extra).strip()
+        conn.execute(
+            "INSERT INTO items (id, name, category, status, total_qty, available_qty, unit, location, notes, description, price_rub, last_verified_at, created_at, updated_at) "
+            "VALUES (?, ?, 'unknown', ?, ?, ?, 'pcs', 'unsorted', ?, '', 0, ?, ?, ?)",
+            (new_id, entry["name"], status, entry["qty"], available, notes, verified, now, now),
+        )
+        if proj:
+            conn.execute(
+                "INSERT INTO item_usage (item_id, project_id, qty, role, since, removable) VALUES (?, ?, ?, '', ?, 1)",
+                (new_id, proj["id"], entry["qty"], now[:10]),
+            )
+        conn.commit()
+        entry["created"] = True
+        where = f"в проекте {proj['name']}" if proj else "свободной (всплывёт в «новых» для уточнения)"
+        send(chat_id, f"➕ Создал «{entry['name']}» {where}.")
+    entry["done"] = "yes"
+    layout_save_queue(conn, user_id, queue, pos + 1)
+    _layout_show_next(conn, chat_id, user_id)
+
+
 def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
     """Free-form reply during an inventory session. Returns True if consumed."""
     awaiting_id = sess["await_qty_for"]
@@ -1403,6 +1565,16 @@ def handle_message(conn, message: dict) -> None:
 
     text = message.get("text") or message.get("caption") or ""
 
+    # Активная раскладка устройств: текст = уточнение к текущему пункту.
+    lay_queue, lay_pos = layout_get(conn, user_id)
+    if lay_queue is not None and text and not text.startswith("/"):
+        if lay_pos < len(lay_queue):
+            lay_queue[lay_pos]["user_note"] = text.strip()
+            layout_save_queue(conn, user_id, lay_queue, lay_pos)
+            send(chat_id, "Учёл уточнение — оно ляжет заметкой при подтверждении.")
+            _layout_show_next(conn, chat_id, user_id)
+            return
+
     # Inventory mode: free-form replies, numbers and photos apply to the current card.
     sess = inv_get(conn, user_id)
     if sess and text and not text.startswith("/") and not message.get("photo"):
@@ -1443,6 +1615,10 @@ def handle_message(conn, message: dict) -> None:
 
     print(f"step: remember user msg", flush=True)
     remember_chat(conn, user_id, "user", text or "[photo]")
+    if text and not photo_paths and _looks_like_device_layout(conn, text):
+        print("step: route=layout", flush=True)
+        _layout_start(conn, chat_id, user_id, text)
+        return
     if looks_like_inventory_update(text, bool(photo_paths)):
         print(f"step: route=inventory", flush=True)
         send_chat_action(chat_id, "typing")

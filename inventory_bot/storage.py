@@ -505,6 +505,58 @@ def item_append_note(conn, item_id: str, text: str) -> None:
     conn.commit()
 
 
+def layout_set(conn, user_id: int, queue: list) -> None:
+    conn.execute(
+        "INSERT INTO layout_state (user_id, queue_json, pos, created_at) VALUES (?, ?, 0, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET queue_json = excluded.queue_json, pos = 0, created_at = excluded.created_at",
+        (user_id, json.dumps(queue, ensure_ascii=False), utc_now()),
+    )
+    conn.commit()
+
+
+def layout_get(conn, user_id: int):
+    row = conn.execute("SELECT queue_json, pos FROM layout_state WHERE user_id = ?", (user_id,)).fetchone()
+    if not row:
+        return None, 0
+    try:
+        return json.loads(row["queue_json"]), row["pos"]
+    except json.JSONDecodeError:
+        return None, 0
+
+
+def layout_save_queue(conn, user_id: int, queue: list, pos: int) -> None:
+    conn.execute(
+        "UPDATE layout_state SET queue_json = ?, pos = ? WHERE user_id = ?",
+        (json.dumps(queue, ensure_ascii=False), pos, user_id),
+    )
+    conn.commit()
+
+
+def layout_clear(conn, user_id: int) -> None:
+    conn.execute("DELETE FROM layout_state WHERE user_id = ?", (user_id,))
+    conn.commit()
+
+
+def find_item_by_words(conn, search: str):
+    """Best fuzzy match of an item by space-separated keywords; None if too weak."""
+    words = [w for w in re.split(r"\W+", (search or "").lower()) if len(w) >= 2]
+    if not words:
+        return None
+    rows = conn.execute(
+        "SELECT id, name, status, total_qty, available_qty, unit FROM items "
+        "WHERE status NOT IN ('retired', 'lost')"
+    ).fetchall()
+    best, best_score = None, 0
+    for row in rows:
+        name_l = row["name"].lower()
+        score = sum(1 for w in words if w in name_l)
+        if score > best_score:
+            best, best_score = row, score
+    if best is not None and best_score >= max(1, (len(words) + 1) // 2):
+        return best
+    return None
+
+
 def get_project(conn, project_id: str):
     return conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
 

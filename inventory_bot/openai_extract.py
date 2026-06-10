@@ -105,6 +105,95 @@ JSON_SCHEMA = {
 }
 
 
+LAYOUT_PROMPT = """Пользователь описывает свои устройства (проекты) и какие детали в них стоят.
+Разбери текст на пункты: какая деталь, сколько штук, в каком проекте.
+
+Правила:
+- project — ТОЧНО одно из известных имён проектов (передаются в контексте). Если деталь
+  не привязана к проекту или проект непонятен — project = "".
+- name — нормальное русское название детали с маркировкой, как для склада
+  ("Raspberry Pi 3 Model B+", "Модем Fibocom L850-GL", "Дисплей (модель уточнить)").
+- search — 2-4 ключевых слова для поиска этой детали в существующей базе (латиница
+  для маркировок: "raspberry 3", "fibocom", "корпус алюминиевый zero").
+- qty — сколько штук в этом проекте (по умолчанию 1).
+- uncertain — true, если деталь описана неточно ("какой-то дисплей", "820 или 850, кажется с литерой L").
+- note — краткое уточнение неопределённости или контекст ("модель уточнит позже", "820 или 850 с литерой L").
+Если пользователь говорит «таких у меня 2 штуки» про деталь в одном проекте — это qty=2 или
+два пункта в разных проектах, смотри по смыслу.
+Верни только JSON по схеме."""
+
+
+LAYOUT_SCHEMA = {
+    "name": "device_layout",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["items"],
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["project", "name", "search", "qty", "uncertain", "note"],
+                    "properties": {
+                        "project": {"type": "string"},
+                        "name": {"type": "string"},
+                        "search": {"type": "string"},
+                        "qty": {"type": "number"},
+                        "uncertain": {"type": "boolean"},
+                        "note": {"type": "string"},
+                    },
+                },
+            },
+        },
+    },
+    "strict": True,
+}
+
+
+def extract_device_layout(text: str, project_names: list) -> list:
+    """Parse a free-form device description into per-item project assignments."""
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("no OPENAI_API_KEY")
+    model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
+    context = "Известные проекты: " + ", ".join(project_names) + "\n\nОписание:\n" + text
+    payload = {
+        "model": model,
+        "input": [
+            {"role": "system", "content": [{"type": "input_text", "text": LAYOUT_PROMPT}]},
+            {"role": "user", "content": [{"type": "input_text", "text": context}]},
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": LAYOUT_SCHEMA["name"],
+                "schema": LAYOUT_SCHEMA["schema"],
+                "strict": True,
+            }
+        },
+    }
+    base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    req = urllib.request.Request(
+        f"{base_url}/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"OpenAI HTTP {exc.code}: {body}") from exc
+    for output in raw.get("output", []):
+        for part in output.get("content", []):
+            if part.get("type") == "output_text":
+                return json.loads(part.get("text", "{}")).get("items", [])
+    raise RuntimeError("layout: no output_text in response")
+
+
 def _data_url(path: str) -> str:
     mime, _ = mimetypes.guess_type(path)
     if not mime:
