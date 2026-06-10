@@ -888,13 +888,9 @@ def _inv_finish_with_summary(conn, chat_id: int, user_id: int) -> None:
             old = f"{e['old_total']:g}" if e["old_total"] is not None else "?"
             new = f"{e['new_total']:g}" if e["new_total"] is not None else "?"
             lines.append(f"  • {html_escape(e['item_name'])}: {old} → {new}")
-    if consumed:
+    if consumed or lost:
         lines.append("🗑 Списано (из учёта убрано):")
-        for e in consumed:
-            lines.append(f"  • {html_escape(e['item_name'])}")
-    if lost:
-        lines.append("❌ Потеряно:")
-        for e in lost:
+        for e in consumed + lost:
             lines.append(f"  • {html_escape(e['item_name'])}")
     if unchecked:
         lines.append(f"⏭ Не проверено: {unchecked} — всплывут при следующем /inv")
@@ -1119,10 +1115,10 @@ def handle_callback_query(conn, callback: dict) -> None:
         inv_log_event(conn, user_id, item_id, item["name"], "ok")
         answer_callback(cb_id, "Отмечено: всё на месте")
     elif action == "lost" and item:
-        inv_log_event(conn, user_id, item_id, item["name"], "lost", old_total=item["total_qty"])
-        inv_mark_lost(conn, item_id)
+        inv_log_event(conn, user_id, item_id, item["name"], "consumed", old_total=item["total_qty"])
+        item_retire(conn, item_id)
         inv_increment_seen(conn, user_id)
-        answer_callback(cb_id, "Отмечено: потеряно")
+        answer_callback(cb_id, "Списано")
     elif action == "uncnt" and item:
         inv_mark_present(conn, item_id)
         inv_clear_await(conn, user_id)
@@ -1214,11 +1210,12 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         send(chat_id, f"✅ {name} — на месте.{noted}")
         _inv_advance(conn, chat_id, user_id)
     elif action == "lost":
-        inv_log_event(conn, user_id, item_id, name, "lost", old_total=item["total_qty"])
-        inv_mark_lost(conn, item_id)
+        # «Нет/потерял» = списание: из учёта исчезает насовсем.
+        inv_log_event(conn, user_id, item_id, name, "consumed", old_total=item["total_qty"])
+        item_retire(conn, item_id)
         inv_clear_await(conn, user_id)
         inv_increment_seen(conn, user_id)
-        send(chat_id, f"❌ {name} — отметил потерянной.{noted}")
+        send(chat_id, f"🗑 {name} — списал, из учёта убрано.{noted}")
         _inv_advance(conn, chat_id, user_id)
     elif action == "uncounted":
         inv_mark_present(conn, item_id)
