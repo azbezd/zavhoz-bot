@@ -73,8 +73,10 @@ try:
         item_projects,
         item_retire,
         project_by_desc_msg,
+        project_delete,
         project_items,
         project_remove_item,
+        project_rename,
         project_set_desc,
         project_set_desc_msg,
         item_set_category,
@@ -141,8 +143,10 @@ except ImportError:
         item_projects,
         item_retire,
         project_by_desc_msg,
+        project_delete,
         project_items,
         project_remove_item,
+        project_rename,
         project_set_desc,
         project_set_desc_msg,
         item_set_category,
@@ -737,6 +741,25 @@ def _inv_show_project_picker(conn, chat_id: int, item) -> None:
     send_with_keyboard(chat_id, f"Где используется «{html_escape(item['name'])}»?", {"inline_keyboard": rows})
 
 
+def _fmt_project_composition(items) -> list:
+    """Состав проекта по группам: заголовок категории + цитатный блок с пунктами."""
+    if not items:
+        return ["<blockquote><i>пока пусто</i></blockquote>"]
+    groups: dict = {}
+    for it in items:
+        groups.setdefault(it["category"] or "other", []).append(it)
+    order = [c for c in CATEGORY_LABELS if c in groups] + [c for c in groups if c not in CATEGORY_LABELS]
+    lines = []
+    for cat in order:
+        label = CATEGORY_LABELS.get(cat, html_escape(cat or "—"))
+        body = "\n".join(
+            f"• {html_escape(it['name'])} ×{it['qty']:g}{NBSP}{html_escape(_unit_ru(it['unit']))}"
+            for it in groups[cat]
+        )
+        lines.append(f"{label}\n<blockquote>{body}</blockquote>")
+    return lines
+
+
 def _projects_overview(conn, chat_id: int) -> None:
     projects = list_projects(conn)
     if not projects:
@@ -748,14 +771,8 @@ def _projects_overview(conn, chat_id: int) -> None:
         items = project_items(conn, proj["id"])
         desc = f" — <i>{html_escape(proj['description'])}</i>" if proj["description"] else ""
         lines.append(f"<b>{html_escape(proj['name'])}</b>{desc}")
-        if items:
-            body = "\n".join(
-                f"• {html_escape(it['name'])} ×{it['qty']:g}{NBSP}{html_escape(_unit_ru(it['unit']))}"
-                for it in items
-            )
-            lines.append(f"<blockquote>{body}</blockquote>")
-        else:
-            lines.append("<blockquote><i>пока пусто</i></blockquote>")
+        lines.extend(_fmt_project_composition(items))
+        lines.append("")
         btn_row.append({"text": proj["name"], "callback_data": f"prj:show:{proj['id']}"})
         if len(btn_row) == 2:
             rows.append(btn_row)
@@ -775,19 +792,16 @@ def _project_card(conn, chat_id: int, project_id: str) -> None:
     lines = [f"<b>🛠 {html_escape(proj['name'])}</b>"]
     if proj["description"]:
         lines.append(f"<i>{html_escape(proj['description'])}</i>")
-    if items:
-        body = "\n".join(
-            f"• {html_escape(it['name'])} ×{it['qty']:g}{NBSP}{html_escape(_unit_ru(it['unit']))}"
-            for it in items
-        )
-        lines.append(f"<blockquote>{body}</blockquote>")
-    else:
-        lines.append("<blockquote><i>Деталей пока нет.</i></blockquote>")
-    lines.append("Ответь на это сообщение текстом — обновлю описание проекта.")
+    lines.extend(_fmt_project_composition(items))
+    lines.append("Ответь на это сообщение: текст станет описанием; "
+                 "«переименуй в Имя» — переименует; «удали проект» — удалит.")
     kb_rows = []
     if items:
         kb_rows.append([{"text": "➖ Вынуть деталь", "callback_data": f"prj:out:{project_id}"}])
-    kb_rows.append([{"text": "↩️ Все проекты", "callback_data": "prj:list:_"}])
+    kb_rows.append([
+        {"text": "🗑 Удалить проект", "callback_data": f"prj:del:{project_id}"},
+        {"text": "↩️ Все проекты", "callback_data": "prj:list:_"},
+    ])
     msg_id = send_with_keyboard(chat_id, "\n".join(lines), {"inline_keyboard": kb_rows})
     if msg_id:
         project_set_desc_msg(conn, project_id, msg_id)
@@ -1039,6 +1053,30 @@ def handle_callback_query(conn, callback: dict) -> None:
             _project_card(conn, chat_id, prj_rest[5:])
         elif prj_rest.startswith("out:"):
             _project_out_menu(conn, chat_id, prj_rest[4:])
+        elif prj_rest.startswith("del:"):
+            pid = prj_rest[4:]
+            proj = get_project(conn, pid)
+            if proj:
+                cnt = len(project_items(conn, pid))
+                kb = {"inline_keyboard": [[
+                    {"text": "🗑 Да, удалить", "callback_data": f"prj:delyes:{pid}"},
+                    {"text": "↩️ Отмена", "callback_data": f"prj:show:{pid}"},
+                ]]}
+                send_with_keyboard(chat_id, f"Удалить проект «{html_escape(proj['name'])}»? "
+                                            f"Его детали ({cnt}) вернутся на склад свободными.", kb)
+        elif prj_rest.startswith("delyes:"):
+            pid = prj_rest[7:]
+            proj = get_project(conn, pid)
+            if proj:
+                freed = project_delete(conn, pid)
+                repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
+                try:
+                    export_items(repo_dir)
+                    maybe_git_sync(repo_dir, f"deleted project {pid}")
+                except Exception as exc:
+                    print(f"prj delete export error: {exc}", flush=True)
+                send(chat_id, f"🗑 Проект «{proj['name']}» удалён, деталей освобождено: {freed}.")
+                _projects_overview(conn, chat_id)
         elif prj_rest.startswith("rm:"):
             proj_id, _, iid = prj_rest[3:].partition(":")
             item = get_item(conn, iid)
@@ -1717,11 +1755,28 @@ def handle_message(conn, message: dict) -> None:
 
     text = message.get("text") or message.get("caption") or ""
 
-    # Ответ (reply) на карточку проекта = новое описание проекта.
+    # Ответ (reply) на карточку проекта: удалить / переименовать / обновить описание.
     reply_to = message.get("reply_to_message") or {}
     if text and not text.startswith("/") and reply_to.get("message_id"):
         proj_row = project_by_desc_msg(conn, int(reply_to["message_id"]))
         if proj_row:
+            low = text.lower().strip()
+            if ("проект" in low and any(w in low for w in ("удали", "удалить", "убери", "убрать"))) or low in ("удали", "удалить"):
+                cnt = len(project_items(conn, proj_row["id"]))
+                kb = {"inline_keyboard": [[
+                    {"text": "🗑 Да, удалить", "callback_data": f"prj:delyes:{proj_row['id']}"},
+                    {"text": "↩️ Отмена", "callback_data": f"prj:show:{proj_row['id']}"},
+                ]]}
+                send_with_keyboard(chat_id, f"Удалить проект «{html_escape(proj_row['name'])}»? "
+                                            f"Его детали ({cnt}) вернутся на склад свободными.", kb)
+                return
+            m = re.match(r"^(?:переименуй|назови|переименовать)(?:\s+(?:в|как))?\s+[«\"']?(.+?)[»\"']?$", text.strip(), re.IGNORECASE)
+            if m:
+                new_name = m.group(1).strip()
+                project_rename(conn, proj_row["id"], new_name)
+                send(chat_id, f"✏️ Проект «{proj_row['name']}» теперь называется «{new_name}».")
+                _project_card(conn, chat_id, proj_row["id"])
+                return
             project_set_desc(conn, proj_row["id"], text)
             send(chat_id, f"✏️ Описание «{proj_row['name']}» обновил: {text.strip()}")
             return

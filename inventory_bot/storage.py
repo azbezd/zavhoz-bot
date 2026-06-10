@@ -569,10 +569,37 @@ def get_project(conn, project_id: str):
 
 def project_items(conn, project_id: str):
     return conn.execute(
-        "SELECT i.id, i.name, i.unit, u.qty FROM item_usage u JOIN items i ON i.id = u.item_id "
-        "WHERE u.project_id = ? AND i.status != 'retired' ORDER BY i.name",
+        "SELECT i.id, i.name, i.unit, i.category, u.qty FROM item_usage u JOIN items i ON i.id = u.item_id "
+        "WHERE u.project_id = ? AND i.status != 'retired' ORDER BY i.category, i.name",
         (project_id,),
     ).fetchall()
+
+
+def project_rename(conn, project_id: str, name: str) -> None:
+    conn.execute(
+        "UPDATE projects SET name = ?, updated_at = ? WHERE id = ?",
+        (name.strip(), utc_now(), project_id),
+    )
+    conn.commit()
+
+
+def project_delete(conn, project_id: str) -> int:
+    """Удалить проект; его детали освобождаются на склад. Возвращает число деталей."""
+    now = utc_now()
+    rows = conn.execute("SELECT DISTINCT item_id FROM item_usage WHERE project_id = ?", (project_id,)).fetchall()
+    freed = 0
+    for r in rows:
+        conn.execute("DELETE FROM item_usage WHERE project_id = ? AND item_id = ?", (project_id, r["item_id"]))
+        left = conn.execute("SELECT COUNT(*) AS c FROM item_usage WHERE item_id = ?", (r["item_id"],)).fetchone()["c"]
+        if not left:
+            conn.execute(
+                "UPDATE items SET status = 'stock', available_qty = total_qty, updated_at = ? WHERE id = ?",
+                (now, r["item_id"]),
+            )
+        freed += 1
+    conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    conn.commit()
+    return freed
 
 
 def project_remove_item(conn, project_id: str, item_id: str) -> None:
