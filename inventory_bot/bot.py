@@ -27,7 +27,7 @@ socket.getaddrinfo = _ipv6_first_getaddrinfo
 
 try:
     from .export_inventory import export_items, maybe_git_sync
-    from .openai_chat import chat_reply, chat_reply_stream, classify_inv_intent
+    from .openai_chat import chat_reply, chat_reply_stream, classify_inv_intent, stock_rows_query as classify_stock_rows
     from .openai_extract import extract_device_layout, extract_inventory_proposal
     from .storage import (
         apply_proposal,
@@ -97,7 +97,7 @@ try:
     )
 except ImportError:
     from export_inventory import export_items, maybe_git_sync
-    from openai_chat import chat_reply, chat_reply_stream, classify_inv_intent
+    from openai_chat import chat_reply, chat_reply_stream, classify_inv_intent, stock_rows_query as classify_stock_rows
     from openai_extract import extract_device_layout, extract_inventory_proposal
     from storage import (
         apply_proposal,
@@ -1521,6 +1521,47 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         send(chat_id, "Не понял. Нажми кнопку под карточкой или напиши число/«есть»/«нет».")
 
 
+def _looks_like_stock_question(text: str) -> bool:
+    low = text.lower().strip()
+    starts = ("сколько", "какие", "какой", "какая", "что есть", "что у меня", "есть ли", "что за")
+    return low.startswith(starts)
+
+
+def _answer_stock_question(conn, chat_id: int, text: str) -> bool:
+    """Вопрос о наличии: AI выбирает строки склада, бот рендерит список с количествами.
+    Возвращает True, если ответ отправлен."""
+    try:
+        rows, comment, items = classify_stock_rows(conn, text)
+    except Exception as exc:
+        print(f"stock query error: {type(exc).__name__}: {exc}", flush=True)
+        return False
+    sel = [items[r - 1] for r in rows if 1 <= r <= len(items)]
+    if not sel:
+        return False
+    entries = []
+    total_sum, units = 0.0, set()
+    for row in sel:
+        name = html_escape(_typo(row["name"]))
+        src_url = row["source_url"] if "source_url" in row.keys() else None
+        name_part = f'<a href="{html_escape(src_url)}">{name}</a>' if src_url else name
+        projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
+        qty_for_sum = row["total_qty"] if projects_csv else row["available_qty"]
+        qty_part = _fmt_qty(qty_for_sum, row["unit"])
+        proj_part = f"  ·  🔧{NBSP}{html_escape(projects_csv)}" if projects_csv else ""
+        entries.append(f"<blockquote>{name_part}\n{qty_part}{proj_part}</blockquote>")
+        total_sum += qty_for_sum or 0
+        units.add(_unit_ru(row["unit"]))
+    lines = [f"Нашёл позиций: {len(sel)}"]
+    if comment:
+        lines[0] += f" — {html_escape(comment)}"
+    body = "".join(entries)
+    tail = ""
+    if len(sel) > 1 and len(units) == 1:
+        tail = f"\nИтого: {_fmt_qty(total_sum, sel[0]['unit'])}"
+    send(chat_id, lines[0] + "\n" + body + tail, parse_mode="HTML")
+    return True
+
+
 def _looks_like_device_layout(conn, text: str) -> bool:
     """Описание устройств с деталями: упомянуты проекты, это не вопрос."""
     if "?" in text:
@@ -1894,6 +1935,12 @@ def handle_message(conn, message: dict) -> None:
             send(chat_id, reply)
         print(f"step: inventory draft sent", flush=True)
     else:
+        if text and _looks_like_stock_question(text):
+            print("step: route=stock-question", flush=True)
+            send_chat_action(chat_id, "typing")
+            if _answer_stock_question(conn, chat_id, text):
+                remember_chat(conn, user_id, "assistant", "[список позиций по запросу]")
+                return
         print(f"step: route=chat, streaming openai", flush=True)
         reply = _chat_with_stream(conn, chat_id, user_id, text)
         remember_chat(conn, user_id, "assistant", reply)

@@ -117,6 +117,66 @@ def chat_reply(conn, user_id: int, text: str, recent_messages, preferences: dict
     return "\n".join(part for part in parts if part).strip() or "Я не смог сформулировать ответ. Попробуй ещё раз чуть конкретнее."
 
 
+STOCK_QUERY_PROMPT = """Пользователь спрашивает о наличии на своём складе электроники.
+Тебе дан пронумерованный список позиций склада. Выбери НОМЕРА строк, которые отвечают
+на вопрос. Если спрашивают «сколько резисторов» — выбери ВСЕ позиции-резисторы (каждый
+номинал отдельная строка). Если «что есть для ESP32» — всё, что относится к ESP32.
+
+Верни СТРОГО один JSON-объект: {"rows": [числа], "comment": "строка или null"}
+- rows — номера подходящих строк (пустой список, если ничего не подходит или вопрос не про наличие).
+- comment — одна короткая фраза-дополнение по делу, если есть что добавить (иначе null).
+"""
+
+
+def stock_rows_query(conn, question: str):
+    """Подбор строк склада под вопрос «сколько/какие X». Возвращает (rows_list, comment, items)
+    где items — выборка list_items_with_sources в том же порядке нумерации."""
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("no OPENAI_API_KEY")
+    try:
+        from .storage import list_items_with_sources  # локальный импорт во избежание цикла
+    except ImportError:
+        from storage import list_items_with_sources
+    items = list_items_with_sources(conn)
+    numbered = "\n".join(
+        f"{i + 1}. {row['name']} | {row['available_qty']:g}/{row['total_qty']:g} {row['unit']}"
+        for i, row in enumerate(items)
+    )
+    model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
+    payload = {
+        "model": model,
+        "input": [
+            {"role": "system", "content": [{"type": "input_text", "text": STOCK_QUERY_PROMPT}]},
+            {"role": "user", "content": [{"type": "input_text",
+                                          "text": f"Склад:\n{numbered}\n\nВопрос: {question}"}]},
+        ],
+    }
+    base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    req = urllib.request.Request(
+        f"{base_url}/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=40) as resp:
+        raw = json.loads(resp.read().decode("utf-8"))
+    parts = []
+    for output in raw.get("output", []):
+        for part in output.get("content", []):
+            if part.get("type") == "output_text":
+                parts.append(part.get("text", ""))
+    answer = "\n".join(parts).strip()
+    start, end = answer.find("{"), answer.rfind("}")
+    if start == -1 or end == -1:
+        raise RuntimeError(f"stock query: no JSON: {answer[:120]!r}")
+    data = json.loads(answer[start:end + 1])
+    rows = [int(r) for r in (data.get("rows") or []) if isinstance(r, (int, float))]
+    comment = data.get("comment")
+    comment = str(comment).strip() if comment else None
+    return rows, comment, items
+
+
 INV_INTENT_PROMPT = """Ты разбираешь ответ пользователя во время инвентаризации склада электроники.
 Пользователю показана позиция, он отвечает свободным текстом. Определи намерение.
 
