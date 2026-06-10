@@ -30,6 +30,7 @@ def _migrate(conn) -> None:
             ("await_kind", "TEXT NOT NULL DEFAULT 'qty'"),
             ("pending_json", "TEXT NOT NULL DEFAULT ''"),
             ("mode", "TEXT NOT NULL DEFAULT 'walk'"),
+            ("scope", "TEXT NOT NULL DEFAULT 'all'"),
         ],
     }
     for table, columns in wanted.items():
@@ -192,18 +193,26 @@ def item_first_source(conn, item_id: str):
     return (row["title"], row["url"]) if row else (None, None)
 
 
-def inv_start(conn, user_id: int, chat_id: int, mode: str = "walk") -> None:
+def inv_start(conn, user_id: int, chat_id: int, mode: str = "walk", scope: str = "all") -> None:
     now = utc_now()
     conn.execute(
-        "INSERT INTO inv_sessions (user_id, chat_id, started_at, last_action_at, seen, await_qty_for, last_prompt_message_id, pass_no, skipped_json, current_item_id, mode) "
-        "VALUES (?, ?, ?, ?, 0, '', 0, 1, '[]', '', ?) "
+        "INSERT INTO inv_sessions (user_id, chat_id, started_at, last_action_at, seen, await_qty_for, last_prompt_message_id, pass_no, skipped_json, current_item_id, mode, scope) "
+        "VALUES (?, ?, ?, ?, 0, '', 0, 1, '[]', '', ?, ?) "
         "ON CONFLICT(user_id) DO UPDATE SET chat_id = excluded.chat_id, started_at = excluded.started_at, "
         "last_action_at = excluded.last_action_at, seen = 0, await_qty_for = '', last_prompt_message_id = 0, "
-        "pass_no = 1, skipped_json = '[]', current_item_id = '', mode = excluded.mode",
-        (user_id, chat_id, now, now, mode),
+        "pass_no = 1, skipped_json = '[]', current_item_id = '', mode = excluded.mode, scope = excluded.scope",
+        (user_id, chat_id, now, now, mode, scope),
     )
     conn.execute("DELETE FROM inv_events WHERE user_id = ?", (user_id,))
     conn.commit()
+
+
+def inv_new_count(conn) -> int:
+    """Positions never verified at all (fresh arrivals)."""
+    return conn.execute(
+        "SELECT COUNT(*) AS c FROM items WHERE (last_verified_at IS NULL OR last_verified_at = '') "
+        "AND status NOT IN ('retired', 'wishlist', 'in_use', 'lost')"
+    ).fetchone()["c"]
 
 
 def items_in_category(conn, category: str, offset: int = 0, limit: int = 8):
@@ -406,12 +415,14 @@ def inv_next_item(conn, user_id: int):
         clause = f"AND id IN ({placeholders})"
     else:
         clause = f"AND id NOT IN ({placeholders})" if skipped else ""
+    scope_clause = "AND (last_verified_at IS NULL OR last_verified_at = '')" if sess["scope"] == "new" else ""
     return conn.execute(
         f"""
         SELECT id, name, category, status, total_qty, available_qty, unit, location, price_rub, description, last_verified_at, notes
         FROM items
-        WHERE status NOT IN ('retired', 'wishlist', 'in_use')
+        WHERE status NOT IN ('retired', 'wishlist', 'in_use', 'lost')
           AND (last_verified_at IS NULL OR last_verified_at = '' OR last_verified_at < ?)
+          {scope_clause}
           {clause}
         ORDER BY price_rub DESC, name ASC
         LIMIT 1
@@ -426,14 +437,19 @@ def inv_progress(conn, user_id: int) -> tuple:
     if not sess:
         return (0, 0)
     started = sess["started_at"]
+    scope_clause = ""
+    if sess["scope"] == "new":
+        # Новые = никогда не проверенные + те, что проверили в этой сессии.
+        scope_clause = "AND (last_verified_at IS NULL OR last_verified_at = '' OR last_verified_at >= ?)"
     row = conn.execute(
-        """
+        f"""
         SELECT
           SUM(CASE WHEN last_verified_at >= ? THEN 1 ELSE 0 END) AS done,
           COUNT(*) AS total
-        FROM items WHERE status NOT IN ('retired', 'wishlist', 'in_use')
+        FROM items WHERE status NOT IN ('retired', 'wishlist', 'in_use', 'lost')
+        {scope_clause}
         """,
-        (started,),
+        (started, started) if scope_clause else (started,),
     ).fetchone()
     return (row["done"] or 0, row["total"] or 0)
 
@@ -463,12 +479,14 @@ def inv_mark_present(conn, item_id: str) -> None:
 
 
 def inv_mark_qty(conn, item_id: str, new_total: float) -> None:
-    """Set total to new_total keeping the reserved (in-project) part intact."""
-    row = conn.execute("SELECT total_qty, available_qty FROM items WHERE id = ?", (item_id,)).fetchone()
+    """Set total to new_total keeping the reserved (in-project) part intact.
+    A positive count on a lost item means it was found again."""
+    row = conn.execute("SELECT total_qty, available_qty, status FROM items WHERE id = ?", (item_id,)).fetchone()
     reserved = max(0.0, (row["total_qty"] or 0) - (row["available_qty"] or 0)) if row else 0.0
     new_available = max(0.0, new_total - reserved)
+    status_fix = ", status = 'stock'" if (row and row["status"] == "lost" and new_total > 0) else ""
     conn.execute(
-        "UPDATE items SET total_qty = ?, available_qty = ?, "
+        f"UPDATE items SET total_qty = ?, available_qty = ?{status_fix}, "
         "last_verified_at = ?, updated_at = ? WHERE id = ?",
         (new_total, new_available, utc_now(), utc_now(), item_id),
     )

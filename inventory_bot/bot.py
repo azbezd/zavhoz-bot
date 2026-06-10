@@ -49,6 +49,7 @@ try:
         inv_mark_lost,
         inv_mark_present,
         inv_mark_qty,
+        inv_new_count,
         inv_next_item,
         inv_progress,
         inv_set_await,
@@ -104,6 +105,7 @@ except ImportError:
         inv_mark_lost,
         inv_mark_present,
         inv_mark_qty,
+        inv_new_count,
         inv_next_item,
         inv_progress,
         inv_set_await,
@@ -235,7 +237,11 @@ def send_chat_action(chat_id: int, action: str = "typing") -> None:
 
 
 def send_photo(chat_id: int, photo_url: str, caption: str, reply_markup: dict | None = None) -> int | None:
-    """Send a photo by URL with a caption. Returns the new message_id on success."""
+    """Send a photo with a caption. Accepts an https URL, a Telegram file_id, or a
+    path relative to the inventory repo (uploaded as multipart). Returns message_id."""
+    if not photo_url.startswith("http") and ("/" in photo_url or photo_url.endswith(".jpg") or photo_url.endswith(".png")):
+        repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
+        return _send_photo_file(chat_id, os.path.join(repo_dir, photo_url), caption, reply_markup)
     payload = {
         "chat_id": chat_id,
         "photo": photo_url,
@@ -250,6 +256,49 @@ def send_photo(chat_id: int, photo_url: str, caption: str, reply_markup: dict | 
     except Exception as exc:
         print(f"sendPhoto error: {exc}", flush=True)
         return None
+
+
+def _send_photo_file(chat_id: int, abs_path: str, caption: str, reply_markup: dict | None = None) -> int | None:
+    """Upload a local image file via multipart/form-data."""
+    try:
+        with open(abs_path, "rb") as fh:
+            blob = fh.read()
+    except OSError as exc:
+        print(f"sendPhoto file error: {exc}", flush=True)
+        return None
+    boundary = "----zavhoz" + str(int(time.time() * 1000))
+    parts = []
+
+    def field(fname: str, value: str) -> None:
+        parts.append(
+            (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{fname}\"\r\n\r\n{value}\r\n").encode("utf-8")
+        )
+
+    field("chat_id", str(chat_id))
+    field("caption", caption[:1000])
+    field("parse_mode", "HTML")
+    if reply_markup is not None:
+        field("reply_markup", json.dumps(reply_markup, ensure_ascii=False))
+    parts.append(
+        (f"--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"photo.jpg\"\r\n"
+         "Content-Type: image/jpeg\r\n\r\n").encode("utf-8") + blob + b"\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    req = urllib.request.Request(
+        f"{API_BASE}/bot{token()}/sendPhoto",
+        data=b"".join(parts),
+        method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=40) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        if body.get("ok"):
+            return body.get("result", {}).get("message_id")
+        print(f"sendPhoto upload not ok: {body}", flush=True)
+    except Exception as exc:
+        print(f"sendPhoto upload error: {exc}", flush=True)
+    return None
 
 
 def send_with_keyboard(chat_id: int, text: str, reply_markup: dict) -> int | None:
@@ -483,12 +532,17 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
             ]]}
             send_with_keyboard(chat_id, f"Инвентаризация уже идёт: проверено {done} из {total_count}.", kb)
         else:
-            inv_start(conn, user_id, chat_id)
-            send(chat_id, "Начинаю инвентаризацию: иду от самых дорогих к самым дешёвым.\n\n"
-                          "Можно жать кнопки или отвечать словами: «да», «нет», «осталось 2», "
-                          "«есть, но не считал», «потом». Любой другой текст станет заметкой к позиции, "
-                          "фото — прикрепится к ней.")
-            _inv_advance(conn, chat_id, user_id)
+            new_count = inv_new_count(conn)
+            if new_count:
+                kb = {"inline_keyboard": [[
+                    {"text": f"🆕 Только новые ({new_count})", "callback_data": "inv:scope:new"},
+                    {"text": "🔍 Всё подряд", "callback_data": "inv:scope:all"},
+                ]]}
+                send_with_keyboard(chat_id, "Что проверяем?", kb)
+            else:
+                inv_start(conn, user_id, chat_id)
+                send(chat_id, INV_INTRO)
+                _inv_advance(conn, chat_id, user_id)
     elif cmd == "/edit":
         sess = inv_get(conn, user_id)
         if sess and sess["mode"] == "walk":
@@ -587,7 +641,7 @@ def _unit_ru(unit: str) -> str:
 def _inv_keyboard(item_id: str, skipped_count: int = 0, pass_no: int = 1) -> dict:
     rows = [
         [
-            {"text": "✅ Свободно", "callback_data": f"inv:ok:{item_id}"},
+            {"text": "✅ Есть", "callback_data": f"inv:ok:{item_id}"},
             {"text": "✏️ Изм.", "callback_data": f"inv:edit:{item_id}"},
         ],
         [
@@ -746,6 +800,12 @@ def _inv_show_item(conn, chat_id: int, user_id: int, item) -> None:
     inv_set_current(conn, user_id, item["id"])
 
 
+INV_INTRO = ("Начинаю инвентаризацию: иду от самых дорогих к самым дешёвым.\n\n"
+             "Можно жать кнопки или отвечать словами: «да», «нет», «осталось 2», "
+             "«есть, но не считал», «потом». Любой другой текст станет заметкой к позиции, "
+             "фото — прикрепится к ней.")
+
+
 def _inv_show_back(conn, chat_id: int, user_id: int) -> None:
     """Re-show the current card after a cancel/category change instead of moving on."""
     sess = inv_get(conn, user_id)
@@ -888,6 +948,18 @@ def handle_callback_query(conn, callback: dict) -> None:
     action = parts[1] if len(parts) > 1 else ""
     item_id = parts[2] if len(parts) > 2 else ""
 
+    # Выбор охвата — сессии ещё нет, обрабатываем до проверки.
+    if action == "scope":
+        scope = "new" if item_id == "new" else "all"
+        answer_callback(cb_id, "Только новые" if scope == "new" else "Всё подряд")
+        msg_id = msg.get("message_id")
+        if msg_id:
+            edit_reply_markup(chat_id, int(msg_id), None)
+        inv_start(conn, user_id, chat_id, scope=scope)
+        send(chat_id, INV_INTRO if scope == "all" else "Иду только по новым (непроверенным) позициям, от дорогих к дешёвым.")
+        _inv_advance(conn, chat_id, user_id)
+        return
+
     sess = inv_get(conn, user_id)
     if not sess:
         answer_callback(cb_id, "Сессия инвентаризации не запущена. Команда /inv.")
@@ -944,7 +1016,8 @@ def handle_callback_query(conn, callback: dict) -> None:
             return
         answer_callback(cb_id, "Применяю")
         _inv_apply_action(conn, chat_id, user_id, item, pending.get("action", ""),
-                          qty=pending.get("qty"), note=pending.get("note"))
+                          qty=pending.get("qty"), note=pending.get("note"),
+                          extra_assignments=pending.get("assignments"))
         return
     if action == "cno":
         inv_clear_pending(conn, user_id)
@@ -1088,7 +1161,7 @@ def _rule_intent(text: str):
 
 
 def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
-                      qty=None, note: str | None = None) -> None:
+                      qty=None, note: str | None = None, extra_assignments=None) -> None:
     """Apply a verification outcome expressed in free text to the current card."""
     item_id = item["id"]
     name = item["name"]
@@ -1158,6 +1231,22 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         unit = _unit_ru(item["unit"])
         send(chat_id, f"🔀 {name}: {qty:g}{NBSP}{unit} → {proj['name']} (новая позиция в списке), "
                       f"свободно осталось {remaining:g}{NBSP}{unit}.")
+        _inv_advance(conn, chat_id, user_id)
+    elif action == "multi" and extra_assignments:
+        unit = _unit_ru(item["unit"])
+        applied = []
+        remaining = item["total_qty"]
+        for a in extra_assignments:
+            proj = _resolve_project(conn, a["project"])
+            if not proj:
+                send(chat_id, f"Проект «{a['project']}» не нашёл — раскладку не применил. Уточни название.")
+                return
+            _, remaining = item_split_to_project(conn, item_id, a["qty"], proj["id"])
+            inv_log_event(conn, user_id, item_id, f"{name}: {a['qty']:g} → {proj['name']}", "split")
+            applied.append(f"{a['qty']:g}{NBSP}{unit} → {proj['name']}")
+        inv_clear_await(conn, user_id)
+        inv_increment_seen(conn, user_id)
+        send(chat_id, f"🔀 {name}: " + "; ".join(applied) + f". Свободно осталось {remaining:g}{NBSP}{unit}.")
         _inv_advance(conn, chat_id, user_id)
     elif action == "skip":
         sess = inv_get(conn, user_id)
@@ -1235,6 +1324,27 @@ def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
         return True
     if intent["action"] == "in_project":
         _inv_apply_action(conn, chat_id, user_id, item, "in_project", note=intent.get("project") or "")
+        return True
+    if intent["action"] == "multi":
+        if not intent.get("assignments"):
+            send(chat_id, "Понял, что разложено по проектам, но не разобрал сколько куда. "
+                          "Скажи явно: «одна в DachaNetBox, одна в NetBox, одна свободна».")
+            return True
+        unit = _unit_ru(item["unit"])
+        parts_txt = []
+        for a in intent["assignments"]:
+            proj = _resolve_project(conn, a["project"])
+            if not proj:
+                send(chat_id, f"Проект «{a['project']}» не узнал. Назови точнее: FreeNet, FreeNetBox, NetBox, DachaNetBox.")
+                return True
+            parts_txt.append(f"{a['qty']:g}{NBSP}{unit} → {proj['name']}")
+        total_assigned = sum(a["qty"] for a in intent["assignments"])
+        free = max(0.0, item["total_qty"] - total_assigned)
+        _inv_request_confirm(
+            conn, chat_id, user_id,
+            {"action": "multi", "item_id": item["id"], "assignments": intent["assignments"]},
+            f"Понял так: «{item['name']}» — " + "; ".join(parts_txt) + f"; свободно {free:g}{NBSP}{unit}. Применяю?",
+        )
         return True
     if intent["action"] == "split":
         if intent["qty_used"] is None:

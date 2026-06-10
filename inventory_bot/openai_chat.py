@@ -121,16 +121,20 @@ INV_INTENT_PROMPT = """Ты разбираешь ответ пользовате
 Пользователю показана позиция, он отвечает свободным текстом. Определи намерение.
 
 Верни СТРОГО один JSON-объект без пояснений:
-{"action": "...", "qty": число или null, "qty_used": число или null, "note": "строка или null", "project": "строка или null"}
+{"action": "...", "qty": число или null, "qty_used": число или null, "note": "строка или null",
+ "project": "строка или null", "assignments": [{"project": "...", "qty": число}] или null}
 
 Допустимые action:
 - "ok" — подтверждает: позиция на месте, свободна ("да", "есть", "всё ок", "на месте")
 - "in_project" — ВСЯ позиция стоит/используется в проекте; положи название проекта в project,
   ТОЧНО как в списке известных проектов ("используется во FreeNet", "стоит в NetBox").
   Если проект не назван или не из списка — project=null.
-- "split" — ЧАСТЬ ушла в проект, часть осталась свободной ("2 ушли во FreeNet, 3 свободны",
+- "split" — ЧАСТЬ ушла в ОДИН проект, часть осталась свободной ("2 ушли во FreeNet, 3 свободны",
   "один стоит в NetBox, остальные в коробке"). qty_used=сколько в проекте, qty=сколько осталось
   свободно (null если не сказано), project=куда ушло.
+- "multi" — позиции разошлись по НЕСКОЛЬКИМ проектам ("одна в DachaNetBox, другая в NetBox",
+  "по одному в FreeNet и NetBox, два свободны"). Заполни assignments списком
+  [{"project": имя из списка, "qty": сколько туда}], qty=сколько осталось свободно (null если не сказано).
 - "consumed" — израсходовано/списано/выброшено, НЕ потеряно ("израсходовал", "списал", "выкинул",
   "использовал все"). Позиция уйдёт из учёта безвозвратно.
 - "lost" — позиции нет, потерял ("нет", "не нашёл", "потерял")
@@ -189,7 +193,7 @@ def classify_inv_intent(item_name: str, unit: str, current_qty: str, text: str,
         raise RuntimeError(f"no JSON in intent answer: {answer[:120]!r}")
     data = json.loads(answer[start:end + 1])
     action = str(data.get("action", "")).lower()
-    if action not in ("ok", "in_project", "split", "consumed", "lost", "qty", "uncounted",
+    if action not in ("ok", "in_project", "split", "multi", "consumed", "lost", "qty", "uncounted",
                       "skip", "stop", "pause", "note", "chat"):
         raise RuntimeError(f"bad intent action: {action!r}")
     qty = data.get("qty")
@@ -200,7 +204,12 @@ def classify_inv_intent(item_name: str, unit: str, current_qty: str, text: str,
     note = str(note).strip() if note else None
     project = data.get("project")
     project = str(project).strip() if project else None
-    return {"action": action, "qty": qty, "qty_used": qty_used, "note": note, "project": project}
+    assignments = []
+    for a in (data.get("assignments") or []):
+        if isinstance(a, dict) and a.get("project") and isinstance(a.get("qty"), (int, float)):
+            assignments.append({"project": str(a["project"]).strip(), "qty": float(a["qty"])})
+    return {"action": action, "qty": qty, "qty_used": qty_used, "note": note,
+            "project": project, "assignments": assignments}
 
 
 def chat_reply_stream(conn, user_id: int, text: str, recent_messages, preferences: dict):
