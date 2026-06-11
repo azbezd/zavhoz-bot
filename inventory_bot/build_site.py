@@ -74,30 +74,29 @@ def _first_photo(conn, item_id):
 
 
 def _index_html(conn, items, groups, order, count):
+    # Публичный каталог: только справочные данные. Без количеств/наличия.
     cards = []
     for cat in order:
         cards.append(f'<div class="cat" data-cat>{E(CATEGORY_LABELS.get(cat, cat))} · {len(groups[cat])}</div>')
         cards.append('<div class="grid">')
         for it in groups[cat]:
             ph = _first_photo(conn, it["id"])
-            phstyle = f'style="background-image:url(../{E(ph)})"' if False else f'style="background-image:url({E(ph)})"'
-            qty = f'{it["available_qty"]:g}' if it["available_qty"] == it["total_qty"] else f'{it["available_qty"]:g}/{it["total_qty"]:g}'
+            phstyle = f'style="background-image:url({E(ph)})"'
             cards.append(
                 f'<a class="card" href="item/{E(it["id"])}.html" data-name="{E(it["name"]).lower()}">'
                 f'<div class="ph" {phstyle}></div>'
-                f'<div class="b"><div class="nm">{E(it["name"])}</div>'
-                f'<div class="q">{qty} шт</div></div></a>'
+                f'<div class="b"><div class="nm">{E(it["name"])}</div></div></a>'
             )
         cards.append('</div>')
     body = "\n".join(cards)
     return f"""<!doctype html><html lang=ru><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>Завхоз · склад</title><link rel=stylesheet href="assets/style.css"></head><body>
-<header><h1>🧰 Завхоз — склад электроники</h1><div class=sub>{count} позиций · обновлено из базы</div></header>
+<title>Завхоз · каталог электроники</title><link rel=stylesheet href="assets/style.css"></head><body>
+<header><h1>🧰 Завхоз — каталог электроники</h1><div class=sub>{count} компонентов · справочник с описаниями и документацией</div></header>
 <div class=wrap>
 <input class=search id=q placeholder="Поиск по названию…" oninput="flt()">
 {body}
-<footer>Сгенерировано из базы Завхоза. Ссылки на магазины могут протухать — фото и данные хранятся локально.</footer>
+<footer>Открытый справочник компонентов. Наличие и применение хранятся приватно.</footer>
 </div>
 <script>
 function flt(){{var v=document.getElementById('q').value.toLowerCase();
@@ -108,25 +107,25 @@ document.querySelectorAll('[data-cat]').forEach(function(h){{var g=h.nextElement
 
 
 def _item_html(conn, it):
+    # Публичная карточка-справочник. БЕЗ количества, наличия, проектов, заметок, цены.
     photos = [r["path"] for r in conn.execute("SELECT path FROM item_photos WHERE item_id=? ORDER BY rowid", (it["id"],))]
     sources = conn.execute("SELECT title,url FROM item_sources WHERE item_id=? ORDER BY rowid", (it["id"],)).fetchall()
     manuals = conn.execute("SELECT url_or_path FROM item_manuals WHERE item_id=? ORDER BY rowid", (it["id"],)).fetchall()
-    usage = conn.execute(
-        "SELECT p.name FROM item_usage u JOIN projects p ON p.id=u.project_id WHERE u.item_id=?", (it["id"],)
-    ).fetchall()
-    know = conn.execute("SELECT summary FROM item_knowledge WHERE item_id=?", (it["id"],)).fetchone()
+    know = conn.execute("SELECT summary, specs_json FROM item_knowledge WHERE item_id=?", (it["id"],)).fetchone()
 
-    qty = f'{it["available_qty"]:g}' if it["available_qty"] == it["total_qty"] else f'{it["available_qty"]:g} из {it["total_qty"]:g}'
     gal = "".join(f'<a href="../{E(p)}" target=_blank><img src="../{E(p)}" loading=lazy></a>' for p in photos) or "<i>фото нет</i>"
-    kv = [
-        ("Категория", E(CATEGORY_LABELS.get(it["category"], it["category"]))),
-        ("Количество", f'{qty} {E(it["unit"] or "шт")}'),
-        ("Статус", E(STATUS_LABELS.get(it["status"], it["status"]))),
-    ]
-    if it["price_rub"]:
-        kv.append(("Цена покупки", f'{it["price_rub"]:g} ₽'))
-    if usage:
-        kv.append(("В проектах", ", ".join(E(u["name"]) for u in usage)))
+    kv = [("Категория", E(CATEGORY_LABELS.get(it["category"], it["category"])))]
+    # Характеристики из knowledge.specs_json (словарь параметр→значение).
+    specs = {}
+    if know and know["specs_json"]:
+        try:
+            import json as _json
+            specs = _json.loads(know["specs_json"]) or {}
+        except Exception:
+            specs = {}
+    for k, v in specs.items():
+        if v:
+            kv.append((E(k), E(v)))
     kv_html = "".join(f'<div class="k">{k}</div><div>{v}</div>' for k, v in kv)
 
     extra = []
@@ -134,20 +133,18 @@ def _item_html(conn, it):
         extra.append(f'<div class=sect>Описание</div><div>{E(it["description"])}</div>')
     if know and know["summary"]:
         extra.append(f'<div class=sect>Кратко</div><div>{E(know["summary"])}</div>')
-    if sources:
-        links = " · ".join(f'<a href="{E(s["url"])}" target=_blank rel=noopener>{E(s["title"] or "ссылка")}</a>' for s in sources)
-        extra.append(f'<div class=sect>Где куплено</div><div>{links} <span class=badge>может протухнуть</span></div>')
     if manuals:
         links = "<br>".join(f'<a href="{E(m["url_or_path"])}" target=_blank rel=noopener>{E(m["url_or_path"])}</a>' for m in manuals)
-        extra.append(f'<div class=sect>Документация / вики</div><div>{links}</div>')
-    if it["notes"]:
-        extra.append(f'<div class=sect>Заметки</div><div>{E(it["notes"]).replace(chr(10), "<br>")}</div>')
+        extra.append(f'<div class=sect>Документация и вики</div><div>{links}</div>')
+    if sources:
+        links = " · ".join(f'<a href="{E(s["url"])}" target=_blank rel=noopener>{E(s["title"] or "ссылка")}</a>' for s in sources)
+        extra.append(f'<div class=sect>Где посмотреть / купить</div><div>{links}</div>')
     extra_html = "\n".join(extra)
 
     return f"""<!doctype html><html lang=ru><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>{E(it["name"])} · Завхоз</title><link rel=stylesheet href="../assets/style.css"></head><body>
-<header><h1><a class=back href="../index.html">← склад</a></h1></header>
+<header><h1><a class=back href="../index.html">← каталог</a></h1></header>
 <div class=wrap><div class=item>
 <h2>{E(it["name"])}</h2>
 <div class=gal>{gal}</div>

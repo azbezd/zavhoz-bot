@@ -350,6 +350,30 @@ def item_split_to_project(conn, item_id: str, qty_used: float, project_id: str) 
     return new_id, remaining
 
 
+def item_apply_enrichment(conn, item_id: str, enr: dict) -> None:
+    """Записать обогащение: описание, характеристики (knowledge), datasheet (manual)."""
+    import json as _json
+    now = utc_now()
+    if enr.get("description"):
+        conn.execute("UPDATE items SET description = ?, updated_at = ? WHERE id = ?",
+                     (enr["description"], now, item_id))
+    conn.execute(
+        "INSERT INTO item_knowledge (item_id, summary, specs_json, updated_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(item_id) DO UPDATE SET summary = excluded.summary, specs_json = excluded.specs_json, updated_at = excluded.updated_at",
+        (item_id, enr.get("summary", ""), _json.dumps(enr.get("specs") or {}, ensure_ascii=False), now),
+    )
+    ds = enr.get("datasheet_url")
+    if ds:
+        conn.execute("INSERT OR IGNORE INTO item_manuals (item_id, url_or_path) VALUES (?, ?)", (item_id, ds))
+    conn.commit()
+
+
+def item_add_manual(conn, item_id: str, url: str) -> None:
+    conn.execute("INSERT OR IGNORE INTO item_manuals (item_id, url_or_path) VALUES (?, ?)", (item_id, url.strip()))
+    conn.execute("UPDATE items SET updated_at = ? WHERE id = ?", (utc_now(), item_id))
+    conn.commit()
+
+
 def item_set_name(conn, item_id: str, name: str) -> None:
     conn.execute("UPDATE items SET name = ?, updated_at = ? WHERE id = ?", (name.strip(), utc_now(), item_id))
     conn.commit()

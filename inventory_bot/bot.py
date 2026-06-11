@@ -28,7 +28,7 @@ socket.getaddrinfo = _ipv6_first_getaddrinfo
 try:
     from .export_inventory import export_items, maybe_git_sync
     from .openai_chat import chat_reply, chat_reply_stream, classify_inv_intent, stock_rows_query as classify_stock_rows
-    from .openai_extract import describe_photo, extract_device_layout, extract_inventory_proposal, scrape_amperkot
+    from .openai_extract import describe_photo, enrich_item, extract_device_layout, extract_inventory_proposal, scrape_amperkot
     from .storage import (
         apply_proposal,
         categories_with_counts,
@@ -81,6 +81,7 @@ try:
         project_rename,
         project_set_desc,
         project_set_desc_msg,
+        item_apply_enrichment,
         item_set_category,
         item_set_name,
         item_set_price,
@@ -103,7 +104,7 @@ try:
 except ImportError:
     from export_inventory import export_items, maybe_git_sync
     from openai_chat import chat_reply, chat_reply_stream, classify_inv_intent, stock_rows_query as classify_stock_rows
-    from openai_extract import describe_photo, extract_device_layout, extract_inventory_proposal, scrape_amperkot
+    from openai_extract import describe_photo, enrich_item, extract_device_layout, extract_inventory_proposal, scrape_amperkot
     from storage import (
         apply_proposal,
         categories_with_counts,
@@ -156,6 +157,7 @@ except ImportError:
         project_rename,
         project_set_desc,
         project_set_desc_msg,
+        item_apply_enrichment,
         item_set_category,
         item_set_name,
         item_set_price,
@@ -584,6 +586,13 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
         _render_stock_list(conn, chat_id, rows)
     elif cmd == "/projects":
         _projects_overview(conn, chat_id)
+    elif cmd == "/enrich" and len(parts) == 2:
+        item = get_item(conn, parts[1])
+        if not item:
+            send(chat_id, "Позиция не найдена. Укажи id вида hw-2026-001.")
+        else:
+            _enrich_new_items(conn, chat_id, {"applied": [{"op": "add_item", "item_id": item["id"]}]})
+            _edit_export(conn, f"enrich {item['id']}")
     elif cmd in ("/newproject", "/newproj") and len(parts) >= 2:
         name = " ".join(parts[1:]).strip()
         pid, created = project_create(conn, name)
@@ -601,9 +610,10 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
         send(chat_id, "Ок, выкинул черновик." if ok else "Такого активного черновика нет.")
     elif cmd == "/apply" and len(parts) == 2:
         result = apply_proposal(conn, int(parts[1]))
+        send(chat_id, "Готово, внёс в склад.")
+        _enrich_new_items(conn, chat_id, result)
         export_items(repo_dir)
         maybe_git_sync(repo_dir, f"apply telegram proposal {int(parts[1])}")
-        send(chat_id, "Готово, внёс в склад и экспортировал файлы:\n" + json.dumps(result, ensure_ascii=False, indent=2))
     elif cmd == "/export":
         export_items(repo_dir)
         send(chat_id, "Экспортировал inventory-файлы.")
@@ -769,6 +779,35 @@ def _inv_keyboard(item_id: str, skipped_count: int = 0, pass_no: int = 1) -> dic
         last_row.append({"text": f"↩️ Пропущенные ({skipped_count})", "callback_data": "inv:retskip:_"})
     rows.append(last_row)
     return {"inline_keyboard": rows}
+
+
+def _enrich_new_items(conn, chat_id: int, apply_result: dict) -> None:
+    """После применения черновика — обогатить новые позиции из открытых источников."""
+    new_ids = [op.get("item_id") for op in (apply_result or {}).get("applied", [])
+               if op.get("op") == "add_item" and op.get("item_id")]
+    if not new_ids:
+        return
+    send_chat_action(chat_id, "typing")
+    for iid in new_ids:
+        item = get_item(conn, iid)
+        if not item:
+            continue
+        try:
+            enr = enrich_item(item["name"])
+        except Exception as exc:
+            print(f"enrich error {iid}: {exc}", flush=True)
+            continue
+        item_apply_enrichment(conn, iid, enr)
+        bits = []
+        if enr.get("summary"):
+            bits.append(enr["summary"])
+        if enr.get("specs"):
+            bits.append("Характеристики: " + ", ".join(f"{k}: {v}" for k, v in list(enr["specs"].items())[:6]))
+        if enr.get("datasheet_url"):
+            bits.append("Документация: " + enr["datasheet_url"])
+        msg = f"🧠 Обогатил «{item['name']}» из открытых источников.\n" + ("\n".join(bits) if bits else "Доп. данных не нашёл.")
+        msg += f"\n📖 {item_web_url(iid)}"
+        send(chat_id, msg, disable_web_page_preview=True)
 
 
 def _edit_export(conn, reason: str) -> None:
@@ -1220,9 +1259,10 @@ def handle_callback_query(conn, callback: dict) -> None:
             answer_callback(cb_id, "Применяю")
             try:
                 result = apply_proposal(conn, prop_id)
+                send(chat_id, "Готово, внёс в склад.")
+                _enrich_new_items(conn, chat_id, result)
                 export_items(repo_dir)
                 maybe_git_sync(repo_dir, f"apply telegram proposal {prop_id}")
-                send(chat_id, "Готово, внёс в склад:\n" + json.dumps(result, ensure_ascii=False, indent=2))
             except Exception as exc:
                 send(chat_id, f"Не получилось применить черновик #{prop_id}: {exc}")
         else:
@@ -2081,9 +2121,10 @@ def handle_message(conn, message: dict) -> None:
                 repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
                 try:
                     result = apply_proposal(conn, pend["id"])
+                    send(chat_id, "Готово, внёс в склад.")
+                    _enrich_new_items(conn, chat_id, result)
                     export_items(repo_dir)
                     maybe_git_sync(repo_dir, f"apply telegram proposal {pend['id']}")
-                    send(chat_id, "Готово, внёс в склад:\n" + json.dumps(result, ensure_ascii=False, indent=2))
                 except Exception as exc:
                     send(chat_id, f"Не получилось применить черновик #{pend['id']}: {exc}")
                 return

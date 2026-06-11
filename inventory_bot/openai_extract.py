@@ -194,6 +194,65 @@ def extract_device_layout(text: str, project_names: list) -> list:
     raise RuntimeError("layout: no output_text in response")
 
 
+ENRICH_PROMPT = """Ты составляешь справочную карточку радиодетали/модуля для каталога.
+По названию позиции собери из открытых источников достоверные данные. Если есть веб-поиск —
+проверь по datasheet/вики. Не выдумывай: чего не знаешь точно — оставляй пустым.
+
+Верни СТРОГО один JSON:
+{"summary": "1-2 предложения что это и для чего, по-русски",
+ "description": "развёрнутое описание по-русски (3-6 предложений): назначение, ключевые особенности, типовое применение",
+ "specs": {"параметр": "значение", ...},  // например {"Напряжение питания":"3.3–5 В","Интерфейс":"I2C","Разрешение":"128×64"}
+ "datasheet_url": "прямая ссылка на datasheet/вики/страницу производителя или пустая строка"}
+
+Параметры в specs — по-русски названия, краткие значения с единицами. 4-10 параметров максимум.
+"""
+
+
+def enrich_item(name: str) -> dict:
+    """Обогащение позиции из открытых источников: описание, характеристики, datasheet."""
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("no OPENAI_API_KEY")
+    model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
+    payload = {
+        "model": model,
+        "input": [
+            {"role": "system", "content": [{"type": "input_text", "text": ENRICH_PROMPT}]},
+            {"role": "user", "content": [{"type": "input_text", "text": f"Позиция: {name}"}]},
+        ],
+    }
+    if os.environ.get("INVENTORY_ENABLE_WEB_SEARCH", "1") == "1":
+        payload["tools"] = [{"type": "web_search_preview"}]
+    base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    req = urllib.request.Request(
+        f"{base_url}/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        raw = json.loads(resp.read().decode("utf-8"))
+    parts = []
+    for output in raw.get("output", []):
+        for part in output.get("content", []):
+            if part.get("type") == "output_text":
+                parts.append(part.get("text", ""))
+    answer = "\n".join(parts).strip()
+    start, end = answer.find("{"), answer.rfind("}")
+    if start == -1 or end == -1:
+        raise RuntimeError(f"enrich: no JSON: {answer[:120]!r}")
+    data = json.loads(answer[start:end + 1])
+    specs = data.get("specs") or {}
+    if not isinstance(specs, dict):
+        specs = {}
+    return {
+        "summary": str(data.get("summary") or "").strip(),
+        "description": str(data.get("description") or "").strip(),
+        "specs": {str(k): str(v) for k, v in specs.items() if v},
+        "datasheet_url": str(data.get("datasheet_url") or "").strip(),
+    }
+
+
 def describe_photo(photo_path: str, question: str) -> str:
     """Ответ на вопрос о фото (что это за деталь и т.п.) — без черновиков."""
     api_key = os.environ.get("OPENAI_API_KEY", "")
