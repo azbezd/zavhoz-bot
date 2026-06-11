@@ -288,6 +288,67 @@ def send_photo(chat_id: int, photo_url: str, caption: str, reply_markup: dict | 
         return None
 
 
+def _item_qty_text(row) -> str:
+    qty = row["available_qty"]
+    total = row["total_qty"]
+    projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
+    if projects_csv:
+        return _fmt_qty(total, row["unit"])
+    if qty == total:
+        return _fmt_qty(qty, row["unit"])
+    return f"свободно{NBSP}{_fmt_qty(qty, row['unit'])}{NBSP}из{NBSP}{_fmt_qty(total, row['unit'])}"
+
+
+def _item_li(row) -> str:
+    name = html_escape(_typo(row["name"]))
+    src_url = row["source_url"] if "source_url" in row.keys() else None
+    name_part = f'<a href="{html_escape(src_url)}">{name}</a>' if src_url else name
+    projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
+    proj_part = f"  ·  🔧{NBSP}{html_escape(projects_csv)}" if projects_csv else ""
+    return f"<li>{name_part} — {_item_qty_text(row)}{proj_part}</li>"
+
+
+def _render_stock_list(conn, chat_id: int, rows) -> None:
+    """Склад одним сообщением: заголовки разделов + настоящие списки (Rich Messages).
+    Откат — на цитатный вид по группам, если sendRichMessage недоступен."""
+    groups: dict[str, list] = {}
+    for row in rows:
+        groups.setdefault(row["category"] or "other", []).append(row)
+    order = [c for c in CATEGORY_LABELS if c in groups] + [c for c in groups if c not in CATEGORY_LABELS]
+
+    parts = [f"<h3>📋 Склад · {len(rows)} позиций</h3>"]
+    for cat in order:
+        items = groups[cat]
+        label = CATEGORY_LABELS.get(cat, html_escape(cat))
+        parts.append(f"<h4>{label} · {len(items)}</h4>")
+        parts.append("<ul>" + "".join(_item_li(r) for r in items) + "</ul>")
+    if send_rich(chat_id, "".join(parts)) is not None:
+        return
+
+    # Откат: старый вид — каждая группа отдельным сообщением, позиции цитатами.
+    send(chat_id, f"📋 Склад: {len(rows)} позиций, {len(order)} групп.")
+    for cat in order:
+        items = groups[cat]
+        label = CATEGORY_LABELS.get(cat, html_escape(cat))
+        quotes = [f"<blockquote>{_item_li(r)[4:-5]}</blockquote>" for r in items]
+        send(chat_id, f"<b>{label}</b> · {len(items)}\n" + "\n".join(quotes), parse_mode="HTML")
+
+
+def send_rich(chat_id: int, html_content: str, reply_markup: dict | None = None) -> int | None:
+    """Bot API 10.1 sendRichMessage: расширенный HTML (списки, заголовки, details)
+    одним сообщением до 32768 символов. Возвращает message_id или None при сбое —
+    тогда вызывающий откатывается на обычный send."""
+    payload = {"chat_id": chat_id, "rich_message": json.dumps({"html": html_content}, ensure_ascii=False)}
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    try:
+        body = telegram("sendRichMessage", payload, timeout=20)
+        return body.get("result", {}).get("message_id")
+    except Exception as exc:
+        print(f"sendRichMessage error: {exc}", flush=True)
+        return None
+
+
 def _send_photo_file(chat_id: int, abs_path: str, caption: str, reply_markup: dict | None = None) -> int | None:
     """Upload a local image file via multipart/form-data."""
     try:
@@ -499,48 +560,7 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
         if not rows:
             send(chat_id, "Склад пока пустой.")
             return
-        # Группировка по category в порядке появления в CATEGORY_LABELS, потом всё остальное
-        groups: dict[str, list] = {}
-        for row in rows:
-            groups.setdefault(row["category"] or "other", []).append(row)
-        order = [c for c in CATEGORY_LABELS if c in groups] + [c for c in groups if c not in CATEGORY_LABELS]
-
-        send(chat_id, f"📋 Склад: {len(rows)} позиций, {len(order)} групп. Каждая группа — отдельным сообщением.")
-        for cat in order:
-            items = groups[cat]
-            label = CATEGORY_LABELS.get(cat, html_escape(cat))
-            lines = []
-            for row in items:
-                name = html_escape(_typo(row["name"]))
-                src_url = row["source_url"] if "source_url" in row.keys() else None
-                if src_url:
-                    name_part = f'<a href="{html_escape(src_url)}">{name}</a>'
-                else:
-                    name_part = name
-                qty = row["available_qty"]
-                total = row["total_qty"]
-                projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
-                if projects_csv:
-                    # Позиция живёт в проекте: физическое количество без дроби, проект подписан.
-                    qty_part = _fmt_qty(total, row["unit"])
-                elif qty == total:
-                    qty_part = _fmt_qty(qty, row["unit"])
-                else:
-                    qty_part = f"свободно{NBSP}{_fmt_qty(qty, row['unit'])}{NBSP}из{NBSP}{_fmt_qty(total, row['unit'])}"
-                proj_part = f"  ·  🔧{NBSP}{html_escape(projects_csv)}" if projects_csv else ""
-                # Позиция = отдельная цитата: имя строкой, количество строкой ниже.
-                lines.append(f"<blockquote>{name_part}\n{qty_part}{proj_part}</blockquote>")
-            buf, size, first = [], 0, True
-            for line in lines:
-                if size + len(line.encode("utf-8")) > 3000 and buf:
-                    head = f"<b>{label}</b> · {len(items)}" if first else f"<b>{label}</b> <i>(продолжение)</i>"
-                    send(chat_id, head + "\n" + "\n".join(buf), parse_mode="HTML")
-                    buf, size, first = [], 0, False
-                buf.append(line)
-                size += len(line.encode("utf-8"))
-            if buf:
-                head = f"<b>{label}</b> · {len(items)}" if first else f"<b>{label}</b> <i>(продолжение)</i>"
-                send(chat_id, head + "\n" + "\n".join(buf), parse_mode="HTML")
+        _render_stock_list(conn, chat_id, rows)
     elif cmd == "/projects":
         _projects_overview(conn, chat_id)
     elif cmd == "/show" and len(parts) == 2:
@@ -765,23 +785,24 @@ def _inv_show_project_picker(conn, chat_id: int, item) -> None:
     send_with_keyboard(chat_id, f"Где используется «{html_escape(item['name'])}»?", {"inline_keyboard": rows})
 
 
-def _fmt_project_composition(items) -> list:
-    """Состав проекта по группам: заголовок категории + цитатный блок с пунктами."""
+def _project_composition_rich(items) -> str:
+    """Состав проекта по группам: заголовок категории + настоящий список."""
     if not items:
-        return ["<blockquote><i>пока пусто</i></blockquote>"]
+        return "<p><i>пока пусто</i></p>"
     groups: dict = {}
     for it in items:
         groups.setdefault(it["category"] or "other", []).append(it)
     order = [c for c in CATEGORY_LABELS if c in groups] + [c for c in groups if c not in CATEGORY_LABELS]
-    lines = []
+    out = []
     for cat in order:
         label = CATEGORY_LABELS.get(cat, html_escape(cat or "—"))
-        body = "\n".join(
-            f"<blockquote>{html_escape(_typo(it['name']))}\n{_fmt_qty(it['qty'], it['unit'])}</blockquote>"
+        out.append(f"<h6>{label}</h6><ul>")
+        out.append("".join(
+            f"<li>{html_escape(_typo(it['name']))} — {_fmt_qty(it['qty'], it['unit'])}</li>"
             for it in groups[cat]
-        )
-        lines.append(f"{label}\n{body}")
-    return lines
+        ))
+        out.append("</ul>")
+    return "".join(out)
 
 
 def _projects_overview(conn, chat_id: int) -> None:
@@ -789,22 +810,26 @@ def _projects_overview(conn, chat_id: int) -> None:
     if not projects:
         send(chat_id, "Проекты пока не заведены.")
         return
-    lines = ["<b>🛠 Проекты</b>", ""]
+    parts = ["<h3>🛠 Проекты</h3>"]
     btn_row, rows = [], []
     for proj in projects:
         items = project_items(conn, proj["id"])
         desc = f" — <i>{html_escape(proj['description'])}</i>" if proj["description"] else ""
-        lines.append(f"<b>{html_escape(proj['name'])}</b>{desc}")
-        lines.extend(_fmt_project_composition(items))
-        lines.append("")
+        parts.append(f"<h4>{html_escape(proj['name'])}{desc}</h4>")
+        parts.append(_project_composition_rich(items))
         btn_row.append({"text": proj["name"], "callback_data": f"prj:show:{proj['id']}"})
         if len(btn_row) == 2:
             rows.append(btn_row)
             btn_row = []
     if btn_row:
         rows.append(btn_row)
-    lines.append("Кнопкой ниже можно открыть проект и поправить его.")
-    send_with_keyboard(chat_id, "\n".join(lines).strip(), {"inline_keyboard": rows})
+    parts.append("<p>Кнопкой ниже можно открыть проект и поправить его.</p>")
+    if send_rich(chat_id, "".join(parts), {"inline_keyboard": rows}) is not None:
+        return
+    # Откат на простой текст.
+    flat = "<b>🛠 Проекты</b>\n" + "\n".join(
+        f"<b>{html_escape(p['name'])}</b> — {len(project_items(conn, p['id']))} деталей" for p in projects)
+    send_with_keyboard(chat_id, flat, {"inline_keyboard": rows})
 
 
 def _project_card(conn, chat_id: int, project_id: str) -> None:
@@ -813,12 +838,12 @@ def _project_card(conn, chat_id: int, project_id: str) -> None:
         send(chat_id, "Проект не нашёл.")
         return
     items = project_items(conn, project_id)
-    lines = [f"<b>🛠 {html_escape(proj['name'])}</b>"]
+    parts = [f"<h3>🛠 {html_escape(proj['name'])}</h3>"]
     if proj["description"]:
-        lines.append(f"<i>{html_escape(proj['description'])}</i>")
-    lines.extend(_fmt_project_composition(items))
-    lines.append("Ответь на это сообщение: текст станет описанием; "
-                 "«переименуй в Имя» — переименует; «удали проект» — удалит.")
+        parts.append(f"<p><i>{html_escape(proj['description'])}</i></p>")
+    parts.append(_project_composition_rich(items))
+    parts.append("<p>Ответь на это сообщение: текст станет описанием; "
+                 "«переименуй в Имя» — переименует; «удали проект» — удалит.</p>")
     kb_rows = []
     if items:
         kb_rows.append([{"text": "➖ Вынуть деталь", "callback_data": f"prj:out:{project_id}"}])
@@ -826,7 +851,14 @@ def _project_card(conn, chat_id: int, project_id: str) -> None:
         {"text": "🗑 Удалить проект", "callback_data": f"prj:del:{project_id}"},
         {"text": "↩️ Все проекты", "callback_data": "prj:list:_"},
     ])
-    msg_id = send_with_keyboard(chat_id, "\n".join(lines), {"inline_keyboard": kb_rows})
+    msg_id = send_rich(chat_id, "".join(parts), {"inline_keyboard": kb_rows})
+    if msg_id is None:
+        flat = [f"<b>🛠 {html_escape(proj['name'])}</b>"]
+        if proj["description"]:
+            flat.append(f"<i>{html_escape(proj['description'])}</i>")
+        for it in items:
+            flat.append(f"• {html_escape(it['name'])} — {_fmt_qty(it['qty'], it['unit'])}")
+        msg_id = send_with_keyboard(chat_id, "\n".join(flat), {"inline_keyboard": kb_rows})
     if msg_id:
         project_set_desc_msg(conn, project_id, msg_id)
 
@@ -1565,27 +1597,22 @@ def _answer_stock_question(conn, chat_id: int, text: str) -> bool:
     sel = [items[r - 1] for r in rows if 1 <= r <= len(items)]
     if not sel:
         return False
-    entries = []
     total_sum, units = 0.0, set()
     for row in sel:
-        name = html_escape(_typo(row["name"]))
-        src_url = row["source_url"] if "source_url" in row.keys() else None
-        name_part = f'<a href="{html_escape(src_url)}">{name}</a>' if src_url else name
         projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
-        qty_for_sum = row["total_qty"] if projects_csv else row["available_qty"]
-        qty_part = _fmt_qty(qty_for_sum, row["unit"])
-        proj_part = f"  ·  🔧{NBSP}{html_escape(projects_csv)}" if projects_csv else ""
-        entries.append(f"<blockquote>{name_part}\n{qty_part}{proj_part}</blockquote>")
-        total_sum += qty_for_sum or 0
+        total_sum += (row["total_qty"] if projects_csv else row["available_qty"]) or 0
         units.add(_unit_ru(row["unit"]))
-    lines = [f"Нашёл позиций: {len(sel)}"]
+    head = f"Нашёл позиций: {len(sel)}"
     if comment:
-        lines[0] += f" — {html_escape(comment)}"
-    body = "\n".join(entries)
+        head += f" — {html_escape(comment)}"
     tail = ""
     if len(sel) > 1 and len(units) == 1:
-        tail = f"\nИтого: {_fmt_qty(total_sum, sel[0]['unit'])}"
-    send(chat_id, lines[0] + "\n" + body + tail, parse_mode="HTML")
+        tail = f"\n<b>Итого: {_fmt_qty(total_sum, sel[0]['unit'])}</b>"
+    rich = f"<h4>{head}</h4><ul>" + "".join(_item_li(r) for r in sel) + "</ul>" + (f"<p>{tail.strip()}</p>" if tail else "")
+    if send_rich(chat_id, rich) is not None:
+        return True
+    quotes = [f"<blockquote>{_item_li(r)[4:-5]}</blockquote>" for r in sel]
+    send(chat_id, head + "\n" + "\n".join(quotes) + tail, parse_mode="HTML")
     return True
 
 
