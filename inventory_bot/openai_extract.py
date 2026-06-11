@@ -194,22 +194,33 @@ def extract_device_layout(text: str, project_names: list) -> list:
     raise RuntimeError("layout: no output_text in response")
 
 
-ENRICH_PROMPT = """Ты составляешь справочную карточку радиодетали/модуля для каталога.
-По названию позиции собери из открытых источников достоверные данные. Если есть веб-поиск —
-проверь по datasheet/вики. Не выдумывай: чего не знаешь точно — оставляй пустым.
+ENRICH_PROMPT = """Ты — инженер-документалист. Составляешь справочную карточку радиодетали/модуля
+для открытого каталога. Это публичная страница: НИКАКИХ цен, дат покупки, мест покупки.
+
+Методика (следуй ей и кратко опиши в reasoning):
+1. Определи КАНОНИЧЕСКУЮ деталь по названию: точную маркировку/семейство
+   (напр. «ИК-приёмник VS1838» → VS1838B; «Raspberry Pi 3 Model B+» → BCM2837B0).
+2. Найди ОФИЦИАЛЬНЫЕ источники в таком приоритете:
+   а) сайт/документация производителя или datasheet (Espressif, Raspberry Pi, Huawei,
+      Texas Instruments, и т.п.);
+   б) авторитетная вики/документация сообщества (Raspberry Pi docs, Arduino Docs,
+      Espressif docs, Waveshare wiki, ChipDip/АльфаЧип — только страница с тех. данными);
+   в) надёжный магазинный datasheet-PDF, если официального нет.
+   НЕ давай ссылки на маркетплейсы (ozon, wildberries, amperkot, aliexpress) и форумы-свалки.
+3. Бери характеристики только из найденного, не выдумывай. Если деталь общая
+   (резистор, провод, винт) — дай типовые параметры и назначение, docs можно оставить пустым.
 
 Верни СТРОГО один JSON:
-{"summary": "1-2 предложения что это и для чего, по-русски",
- "description": "развёрнутое описание по-русски (3-6 предложений): назначение, ключевые особенности, типовое применение",
- "specs": {"параметр": "значение", ...},  // например {"Напряжение питания":"3.3–5 В","Интерфейс":"I2C","Разрешение":"128×64"}
- "datasheet_url": "прямая ссылка на datasheet/вики/страницу производителя или пустая строка"}
-
-Параметры в specs — по-русски названия, краткие значения с единицами. 4-10 параметров максимум.
+{"summary": "1-2 предложения по-русски: что это и для чего",
+ "description": "3-6 предложений по-русски: назначение, особенности, типовое применение",
+ "specs": {"Параметр": "значение с единицами", ...},   // 4-10 шт, названия по-русски
+ "docs": [{"title": "коротко что за источник по-русски", "url": "https://…"}],  // 0-3 ОФИЦИАЛЬНЫХ ссылки
+ "reasoning": "1-2 предложения: какую деталь опознал, где искал, почему выбрал эти источники"}
 """
 
 
 def enrich_item(name: str) -> dict:
-    """Обогащение позиции из открытых источников: описание, характеристики, datasheet."""
+    """Обогащение позиции из открытых источников: описание, характеристики, офиц. документация."""
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         raise RuntimeError("no OPENAI_API_KEY")
@@ -245,11 +256,19 @@ def enrich_item(name: str) -> dict:
     specs = data.get("specs") or {}
     if not isinstance(specs, dict):
         specs = {}
+    docs = []
+    BAD = ("ozon.", "wildberries", "wb.ru", "aliexpress", "amperkot", "avito")
+    for d in (data.get("docs") or []):
+        if isinstance(d, dict) and d.get("url", "").startswith("http"):
+            url = d["url"].strip()
+            if not any(b in url.lower() for b in BAD):
+                docs.append({"title": str(d.get("title") or "Документация").strip(), "url": url})
     return {
         "summary": str(data.get("summary") or "").strip(),
         "description": str(data.get("description") or "").strip(),
         "specs": {str(k): str(v) for k, v in specs.items() if v},
-        "datasheet_url": str(data.get("datasheet_url") or "").strip(),
+        "docs": docs[:3],
+        "reasoning": str(data.get("reasoning") or "").strip(),
     }
 
 

@@ -29,6 +29,9 @@ def _migrate(conn) -> None:
         "projects": [
             ("desc_msg_id", "INTEGER NOT NULL DEFAULT 0"),
         ],
+        "item_manuals": [
+            ("title", "TEXT NOT NULL DEFAULT ''"),
+        ],
         "inv_sessions": [
             ("pass_no", "INTEGER NOT NULL DEFAULT 1"),
             ("skipped_json", "TEXT NOT NULL DEFAULT '[]'"),
@@ -351,7 +354,7 @@ def item_split_to_project(conn, item_id: str, qty_used: float, project_id: str) 
 
 
 def item_apply_enrichment(conn, item_id: str, enr: dict) -> None:
-    """Записать обогащение: описание, характеристики (knowledge), datasheet (manual)."""
+    """Записать обогащение: описание, характеристики (knowledge), офиц. документация (manuals)."""
     import json as _json
     now = utc_now()
     if enr.get("description"):
@@ -362,9 +365,17 @@ def item_apply_enrichment(conn, item_id: str, enr: dict) -> None:
         "ON CONFLICT(item_id) DO UPDATE SET summary = excluded.summary, specs_json = excluded.specs_json, updated_at = excluded.updated_at",
         (item_id, enr.get("summary", ""), _json.dumps(enr.get("specs") or {}, ensure_ascii=False), now),
     )
-    ds = enr.get("datasheet_url")
-    if ds:
-        conn.execute("INSERT OR IGNORE INTO item_manuals (item_id, url_or_path) VALUES (?, ?)", (item_id, ds))
+    # Документация: переписываем найденными официальными источниками (старые авто-доки чистим).
+    docs = enr.get("docs")
+    if docs is None and enr.get("datasheet_url"):  # совместимость со старым форматом
+        docs = [{"title": "Datasheet", "url": enr["datasheet_url"]}]
+    if docs:
+        conn.execute("DELETE FROM item_manuals WHERE item_id = ?", (item_id,))
+        for d in docs:
+            conn.execute(
+                "INSERT OR IGNORE INTO item_manuals (item_id, url_or_path, title) VALUES (?, ?, ?)",
+                (item_id, d["url"], d.get("title", "")),
+            )
     conn.commit()
 
 

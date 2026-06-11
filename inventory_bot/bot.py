@@ -803,8 +803,8 @@ def _enrich_new_items(conn, chat_id: int, apply_result: dict) -> None:
             bits.append(enr["summary"])
         if enr.get("specs"):
             bits.append("Характеристики: " + ", ".join(f"{k}: {v}" for k, v in list(enr["specs"].items())[:6]))
-        if enr.get("datasheet_url"):
-            bits.append("Документация: " + enr["datasheet_url"])
+        for d in (enr.get("docs") or [])[:3]:
+            bits.append(f"📄 {d.get('title', 'Документация')}: {d['url']}")
         msg = f"🧠 Обогатил «{item['name']}» из открытых источников.\n" + ("\n".join(bits) if bits else "Доп. данных не нашёл.")
         msg += f"\n📖 {item_web_url(iid)}"
         send(chat_id, msg, disable_web_page_preview=True)

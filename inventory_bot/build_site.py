@@ -109,8 +109,7 @@ document.querySelectorAll('[data-cat]').forEach(function(h){{var g=h.nextElement
 def _item_html(conn, it):
     # Публичная карточка-справочник. БЕЗ количества, наличия, проектов, заметок, цены.
     photos = [r["path"] for r in conn.execute("SELECT path FROM item_photos WHERE item_id=? ORDER BY rowid", (it["id"],))]
-    sources = conn.execute("SELECT title,url FROM item_sources WHERE item_id=? ORDER BY rowid", (it["id"],)).fetchall()
-    manuals = conn.execute("SELECT url_or_path FROM item_manuals WHERE item_id=? ORDER BY rowid", (it["id"],)).fetchall()
+    manuals = conn.execute("SELECT url_or_path, title FROM item_manuals WHERE item_id=? ORDER BY rowid", (it["id"],)).fetchall()
     know = conn.execute("SELECT summary, specs_json FROM item_knowledge WHERE item_id=?", (it["id"],)).fetchone()
 
     gal = "".join(f'<a href="../{E(p)}" target=_blank><img src="../{E(p)}" loading=lazy></a>' for p in photos) or "<i>фото нет</i>"
@@ -134,11 +133,11 @@ def _item_html(conn, it):
     if know and know["summary"]:
         extra.append(f'<div class=sect>Кратко</div><div>{E(know["summary"])}</div>')
     if manuals:
-        links = "<br>".join(f'<a href="{E(m["url_or_path"])}" target=_blank rel=noopener>{E(m["url_or_path"])}</a>' for m in manuals)
-        extra.append(f'<div class=sect>Документация и вики</div><div>{links}</div>')
-    if sources:
-        links = " · ".join(f'<a href="{E(s["url"])}" target=_blank rel=noopener>{E(s["title"] or "ссылка")}</a>' for s in sources)
-        extra.append(f'<div class=sect>Где посмотреть / купить</div><div>{links}</div>')
+        links = "<br>".join(
+            f'<a href="{E(m["url_or_path"])}" target=_blank rel=noopener>{E(m["title"] or m["url_or_path"])}</a>'
+            for m in manuals
+        )
+        extra.append(f'<div class=sect>Документация</div><div>{links}</div>')
     extra_html = "\n".join(extra)
 
     return f"""<!doctype html><html lang=ru><head><meta charset=utf-8>
