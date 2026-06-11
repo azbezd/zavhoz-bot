@@ -949,8 +949,9 @@ def apply_proposal(conn, proposal_id: int) -> dict:
             applied.append({"op": op_name, "item_id": item_id, "changed": [s.split(' =')[0] for s in sets if '=' in s]})
 
         elif op_name == "adjust_qty":
-            if not item_id:
-                raise ValueError("adjust_qty requires item_id")
+            if not item_id or not get_item(conn, item_id):
+                applied.append({"op": op_name, "result": "item not found", "item_id": item_id})
+                continue
             conn.execute(
                 """
                 UPDATE items
@@ -964,8 +965,9 @@ def apply_proposal(conn, proposal_id: int) -> dict:
             applied.append({"op": op_name, "item_id": item_id, "qty": qty})
 
         elif op_name == "mark_used":
-            if not item_id:
-                raise ValueError("mark_used requires item_id")
+            if not item_id or not get_item(conn, item_id):
+                applied.append({"op": op_name, "result": "item not found", "item_id": item_id})
+                continue
             project_id = op.get("project_id") or "project-ideas-lab"
             conn.execute(
                 """

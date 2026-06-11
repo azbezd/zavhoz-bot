@@ -557,6 +557,52 @@ def _send_proposal(conn, chat_id: int, proposal_id: int, proposal: dict) -> None
         conn.commit()
 
 
+def _rebuild_draft(conn, chat_id: int, user_id: int, old_id: int, old_text: str, addition: str) -> None:
+    """Пересобрать черновик с уточнением пользователя (правка без потери скрейпленных полей)."""
+    send_chat_action(chat_id, "typing")
+    combined = (old_text or "") + "\n\nУточнение от пользователя: " + addition
+    try:
+        proposal = extract_inventory_proposal(combined, [], _inventory_id_snapshot(conn))
+    except Exception as exc:
+        send(chat_id, f"Уточнение принял, но пересобрать черновик не вышло: {exc}")
+        return
+    # Скрейпленные поля (цена/фото/источник) не теряем при правке.
+    try:
+        old_ops = json.loads(conn.execute(
+            "SELECT proposal_json FROM proposals WHERE id = ?", (old_id,)
+        ).fetchone()["proposal_json"]).get("operations", [])
+        donor = next((o for o in old_ops if o.get("op") == "add_item"
+                      and (o.get("price_rub") or o.get("image_url"))), None)
+        if donor:
+            for op in proposal.get("operations", []):
+                if op.get("op") == "add_item":
+                    for f in ("price_rub", "image_url", "source_url", "source_title"):
+                        if not op.get(f) and donor.get(f):
+                            op[f] = donor[f]
+    except Exception as exc:
+        print(f"draft field carry-over error: {exc}", flush=True)
+    ops = proposal.get("operations", [])
+    if ops and all(o.get("op") == "ask_user" for o in ops):
+        q = "; ".join(filter(None, (o.get("question") for o in ops))) or "Уточни, что именно сделать."
+        send(chat_id, q)
+        return
+    discard_proposal(conn, old_id)
+    new_id = save_proposal(conn, user_id, chat_id, combined, [], proposal)
+    _send_proposal(conn, chat_id, new_id, proposal)
+
+
+def _fresh_pending_draft(conn, user_id: int, minutes: int = 20):
+    """Последний неприменённый черновик не старше minutes; иначе None."""
+    pend = conn.execute(
+        "SELECT id, message_text, created_at FROM proposals WHERE telegram_user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    if not pend:
+        return None
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+    return pend if pend["created_at"] >= cutoff else None
+
+
 def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
     parts = text.strip().split()
     cmd = parts[0].lower()
@@ -2084,36 +2130,7 @@ def handle_message(conn, message: dict) -> None:
             (int(reply_to["message_id"]),),
         ).fetchone()
         if row:
-            send_chat_action(chat_id, "typing")
-            combined = (row["message_text"] or "") + "\n\nУточнение от пользователя: " + text
-            try:
-                proposal = extract_inventory_proposal(combined, [], _inventory_id_snapshot(conn))
-            except Exception as exc:
-                send(chat_id, f"Уточнение принял, но пересобрать черновик не вышло: {exc}")
-                return
-            # Скрейпленные поля (цена/фото/источник) не должны теряться при правке.
-            try:
-                old_ops = json.loads(conn.execute(
-                    "SELECT proposal_json FROM proposals WHERE id = ?", (row["id"],)
-                ).fetchone()["proposal_json"]).get("operations", [])
-                donor = next((o for o in old_ops if o.get("op") == "add_item"
-                              and (o.get("price_rub") or o.get("image_url"))), None)
-                if donor:
-                    for op in proposal.get("operations", []):
-                        if op.get("op") == "add_item":
-                            for f in ("price_rub", "image_url", "source_url", "source_title"):
-                                if not op.get(f) and donor.get(f):
-                                    op[f] = donor[f]
-            except Exception as exc:
-                print(f"draft field carry-over error: {exc}", flush=True)
-            ops = proposal.get("operations", [])
-            if ops and all(o.get("op") == "ask_user" for o in ops):
-                q = "; ".join(filter(None, (o.get("question") for o in ops))) or "Уточни, что именно добавить."
-                send(chat_id, q)
-                return
-            discard_proposal(conn, row["id"])
-            new_id = save_proposal(conn, user_id, chat_id, combined, [], proposal)
-            _send_proposal(conn, chat_id, new_id, proposal)
+            _rebuild_draft(conn, chat_id, user_id, row["id"], row["message_text"], text)
             return
 
     # Короткое подтверждение при висящем черновике = применить последний черновик.
@@ -2145,6 +2162,29 @@ def handle_message(conn, message: dict) -> None:
                 send(chat_id, "Свежего черновика нет. Скажи, что добавить: название и количество, "
                               "либо пришли ссылку на amperkot или фото.")
                 return
+
+    # Реакция на висящий черновик БЕЗ формального «ответа»: пока черновик свежий,
+    # обычный текст = переделать его (или отменить), не уходя в чат-болтовню.
+    if (text and not text.startswith("/") and not message.get("photo")
+            and not inv_get(conn, user_id) and layout_get(conn, user_id)[0] is None
+            and not _looks_like_stock_question(text)):
+        pend = _fresh_pending_draft(conn, user_id)
+        if pend:
+            low = text.strip().lower().rstrip("!.…")
+            NEGATIVE = {"плохо", "нет", "не так", "не то", "неверно", "неправильно",
+                        "не пойдёт", "не годится", "мимо", "отмена", "отмени", "не надо"}
+            CANCEL = {"отмена", "отмени", "не надо", "выкинь", "удали черновик"}
+            if low in CANCEL:
+                discard_proposal(conn, pend["id"])
+                send(chat_id, "Ок, черновик выкинул.")
+                return
+            if low in NEGATIVE:
+                send(chat_id, "Понял, что мимо. Опиши одним сообщением как надо, "
+                              "и я пересоберу черновик. Или «отмена», чтобы выкинуть.")
+                return
+            # Содержательный текст при свежем черновике = уточнение → пересборка.
+            _rebuild_draft(conn, chat_id, user_id, pend["id"], pend["message_text"], text)
+            return
 
     # Активная раскладка устройств: текст = уточнение к текущему пункту.
     lay_queue, lay_pos = layout_get(conn, user_id)
