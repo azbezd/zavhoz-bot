@@ -350,6 +350,53 @@ def item_split_to_project(conn, item_id: str, qty_used: float, project_id: str) 
     return new_id, remaining
 
 
+def item_set_name(conn, item_id: str, name: str) -> None:
+    conn.execute("UPDATE items SET name = ?, updated_at = ? WHERE id = ?", (name.strip(), utc_now(), item_id))
+    conn.commit()
+
+
+def item_set_price(conn, item_id: str, price: float) -> None:
+    conn.execute("UPDATE items SET price_rub = ?, updated_at = ? WHERE id = ?", (price, utc_now(), item_id))
+    conn.commit()
+
+
+def item_set_source(conn, item_id: str, url: str, title: str = "") -> None:
+    """Заменить основной источник позиции (один)."""
+    import re as _re
+    if not title:
+        m = _re.search(r"https?://(?:www\.)?([^/]+)", url)
+        title = m.group(1) if m else "источник"
+    conn.execute("DELETE FROM item_sources WHERE item_id = ?", (item_id,))
+    conn.execute(
+        "INSERT OR IGNORE INTO item_sources (item_id, kind, title, url, notes) VALUES (?, 'purchase', ?, ?, '')",
+        (item_id, title, url),
+    )
+    conn.execute("UPDATE items SET updated_at = ? WHERE id = ?", (utc_now(), item_id))
+    conn.commit()
+
+
+def project_create(conn, name: str):
+    """Создать проект; вернуть (id, was_created). Если имя занято — вернуть существующий."""
+    import re as _re
+    name = name.strip()
+    # SQLite lower() не трогает кириллицу — сравниваем в Python через casefold().
+    nf = name.casefold()
+    for row in conn.execute("SELECT id, name FROM projects").fetchall():
+        if (row["name"] or "").casefold() == nf:
+            return row["id"], False
+    slug = _re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "proj"
+    base = f"project-{slug}"
+    pid, n = base, 2
+    while conn.execute("SELECT 1 FROM projects WHERE id = ?", (pid,)).fetchone():
+        pid = f"{base}-{n}"; n += 1
+    conn.execute(
+        "INSERT INTO projects (id, name, description, status, notes, updated_at) VALUES (?, ?, '', 'active', '', ?)",
+        (pid, name, utc_now()),
+    )
+    conn.commit()
+    return pid, True
+
+
 def item_set_category(conn, item_id: str, category: str) -> None:
     conn.execute(
         "UPDATE items SET category = ?, updated_at = ? WHERE id = ?",

@@ -74,6 +74,7 @@ try:
         item_projects,
         item_retire,
         project_by_desc_msg,
+        project_create,
         project_delete,
         project_items,
         project_remove_item,
@@ -81,6 +82,9 @@ try:
         project_set_desc,
         project_set_desc_msg,
         item_set_category,
+        item_set_name,
+        item_set_price,
+        item_set_source,
         item_set_in_project,
         item_split_to_project,
         item_first_photo,
@@ -145,6 +149,7 @@ except ImportError:
         item_projects,
         item_retire,
         project_by_desc_msg,
+        project_create,
         project_delete,
         project_items,
         project_remove_item,
@@ -152,6 +157,9 @@ except ImportError:
         project_set_desc,
         project_set_desc_msg,
         item_set_category,
+        item_set_name,
+        item_set_price,
+        item_set_source,
         item_set_in_project,
         item_split_to_project,
         item_first_photo,
@@ -196,13 +204,17 @@ def telegram(method: str, payload: dict | None = None, timeout: int = 30) -> dic
     return body
 
 
-def send(chat_id: int, text: str, parse_mode: str | None = None, disable_web_page_preview: bool = True) -> None:
+def send(chat_id: int, text: str, parse_mode: str | None = None, disable_web_page_preview: bool = True,
+         return_id: bool = False):
     payload = {"chat_id": chat_id, "text": text[:3900]}
     if parse_mode:
         payload["parse_mode"] = parse_mode
     if disable_web_page_preview:
         payload["disable_web_page_preview"] = "true"
-    telegram("sendMessage", payload)
+    body = telegram("sendMessage", payload)
+    if return_id:
+        return body.get("result", {}).get("message_id")
+    return None
 
 
 def send_html(chat_id: int, text: str) -> None:
@@ -566,6 +578,12 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
         _render_stock_list(conn, chat_id, rows)
     elif cmd == "/projects":
         _projects_overview(conn, chat_id)
+    elif cmd in ("/newproject", "/newproj") and len(parts) >= 2:
+        name = " ".join(parts[1:]).strip()
+        pid, created = project_create(conn, name)
+        _edit_export(conn, f"create project {pid}")
+        send(chat_id, (f"🆕 Проект «{name}» создан." if created else f"Проект «{name}» уже есть."))
+        _project_card(conn, chat_id, pid)
     elif cmd == "/show" and len(parts) == 2:
         row = get_proposal(conn, int(parts[1]))
         if not row:
@@ -747,11 +765,30 @@ def _inv_keyboard(item_id: str, skipped_count: int = 0, pass_no: int = 1) -> dic
     return {"inline_keyboard": rows}
 
 
+def _edit_export(conn, reason: str) -> None:
+    """Тихий экспорт+пуш после точечной правки позиции."""
+    repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
+    try:
+        export_items(repo_dir)
+        maybe_git_sync(repo_dir, reason)
+    except Exception as exc:
+        print(f"edit export error: {exc}", flush=True)
+
+
 def _inv_show_edit_menu(conn, chat_id: int, item) -> None:
+    iid = item["id"]
     kb = {"inline_keyboard": [
         [
-            {"text": "🔢 Количество", "callback_data": f"inv:qty:{item['id']}"},
-            {"text": "🏷 Категория", "callback_data": f"inv:cat:{item['id']}"},
+            {"text": "🔢 Количество", "callback_data": f"inv:qty:{iid}"},
+            {"text": "🏷 Категория", "callback_data": f"inv:cat:{iid}"},
+        ],
+        [
+            {"text": "✏️ Название", "callback_data": f"inv:name:{iid}"},
+            {"text": "💰 Цена", "callback_data": f"inv:price:{iid}"},
+        ],
+        [
+            {"text": "🔗 Источник", "callback_data": f"inv:source:{iid}"},
+            {"text": "🗑 Списать", "callback_data": f"inv:retire:{iid}"},
         ],
         [{"text": "↩️ Отмена", "callback_data": "inv:pcancel:_"}],
     ]}
@@ -828,7 +865,8 @@ def _projects_overview(conn, chat_id: int) -> None:
             btn_row = []
     if btn_row:
         rows.append(btn_row)
-    parts.append("<p>Кнопкой ниже можно открыть проект и поправить его.</p>")
+    rows.append([{"text": "➕ Новый проект", "callback_data": "prj:new:_"}])
+    parts.append("<p>Кнопкой ниже можно открыть проект и поправить его, либо создать новый.</p>")
     if send_rich(chat_id, "".join(parts), {"inline_keyboard": rows}) is not None:
         return
     # Откат на простой текст.
@@ -1110,6 +1148,10 @@ def handle_callback_query(conn, callback: dict) -> None:
         prj_rest = data[4:]
         if prj_rest == "list:_":
             _projects_overview(conn, chat_id)
+        elif prj_rest == "new:_":
+            msg_id = send(chat_id, "Ответь на это сообщение названием нового проекта.", return_id=True)
+            if msg_id:
+                set_preference(conn, "newproj_prompt_msg", str(msg_id))
         elif prj_rest.startswith("show:"):
             _project_card(conn, chat_id, prj_rest[5:])
         elif prj_rest.startswith("out:"):
@@ -1362,6 +1404,36 @@ def handle_callback_query(conn, callback: dict) -> None:
     if action == "cat" and item:
         answer_callback(cb_id)
         _inv_show_category_picker(conn, chat_id, item)
+        return
+    if action in ("name", "price", "source") and item:
+        prompts = {
+            "name": "Напиши новое название одним сообщением.",
+            "price": "Напиши новую цену в рублях (число).",
+            "source": "Пришли ссылку на источник (магазин/карточку).",
+        }
+        inv_set_await(conn, user_id, item_id, kind=action)
+        answer_callback(cb_id, "Жду ввод")
+        send(chat_id, prompts[action])
+        return
+    if action == "retire" and item:
+        answer_callback(cb_id)
+        kb = {"inline_keyboard": [[
+            {"text": "🗑 Да, списать", "callback_data": f"inv:retireyes:{item_id}"},
+            {"text": "↩️ Отмена", "callback_data": "inv:pcancel:_"},
+        ]]}
+        send_with_keyboard(chat_id, f"Списать «{html_escape(item['name'])}»? Уйдёт из учёта.", kb)
+        return
+    if action == "retireyes" and item:
+        item_retire(conn, item_id)
+        answer_callback(cb_id, "Списано")
+        send(chat_id, f"🗑 {item['name']} — списал, из учёта убрано.")
+        repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
+        try:
+            export_items(repo_dir)
+            maybe_git_sync(repo_dir, f"retire {item_id} via edit")
+        except Exception as exc:
+            print(f"retire export error: {exc}", flush=True)
+        _inv_advance(conn, chat_id, user_id)
         return
     if action == "ok" and item:
         inv_mark_present(conn, item_id)
@@ -1764,8 +1836,39 @@ def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
         cat = text.strip().lower()
         item_set_category(conn, awaiting_id, cat)
         inv_clear_await(conn, user_id)
-        send(chat_id, f"🏷 {item['name']} → {cat}. Карточка обновится, жду ответа по наличию.")
-        _inv_advance(conn, chat_id, user_id)
+        _edit_export(conn, "category " + awaiting_id)
+        send(chat_id, f"🏷 {item['name']} → {cat}.")
+        _inv_show_back(conn, chat_id, user_id)
+        return True
+    if awaiting_id and sess["await_kind"] == "name":
+        new_name = text.strip()
+        item_set_name(conn, awaiting_id, new_name)
+        inv_clear_await(conn, user_id)
+        _edit_export(conn, "rename " + awaiting_id)
+        send(chat_id, f"✏️ Название → «{new_name}».")
+        _inv_show_back(conn, chat_id, user_id)
+        return True
+    if awaiting_id and sess["await_kind"] == "price":
+        p = _parse_qty(text)
+        if p is None:
+            send(chat_id, "Нужно число, например 320 или 320.5.")
+            return True
+        item_set_price(conn, awaiting_id, p)
+        inv_clear_await(conn, user_id)
+        _edit_export(conn, "price " + awaiting_id)
+        send(chat_id, f"💰 Цена → {p:g} ₽.")
+        _inv_show_back(conn, chat_id, user_id)
+        return True
+    if awaiting_id and sess["await_kind"] == "source":
+        url_m = re.search(r"https?://\S+", text)
+        if not url_m:
+            send(chat_id, "Пришли ссылку (начинается с http). Или «отмена» под карточкой.")
+            return True
+        item_set_source(conn, awaiting_id, url_m.group(0))
+        inv_clear_await(conn, user_id)
+        _edit_export(conn, "source " + awaiting_id)
+        send(chat_id, "🔗 Источник обновил.")
+        _inv_show_back(conn, chat_id, user_id)
         return True
 
     qty = _parse_qty(text)
@@ -1877,8 +1980,19 @@ def handle_message(conn, message: dict) -> None:
 
     text = message.get("text") or message.get("caption") or ""
 
-    # Ответ (reply) на карточку проекта: удалить / переименовать / обновить описание.
     reply_to = message.get("reply_to_message") or {}
+    # Ответ на промпт «название нового проекта».
+    if text and not text.startswith("/") and reply_to.get("message_id"):
+        prefs = get_preferences(conn)
+        if prefs.get("newproj_prompt_msg") == str(reply_to["message_id"]):
+            pid, created = project_create(conn, text.strip())
+            set_preference(conn, "newproj_prompt_msg", "")
+            _edit_export(conn, f"create project {pid}")
+            send(chat_id, f"🆕 Проект «{text.strip()}» создан." if created else f"Проект «{text.strip()}» уже есть.")
+            _project_card(conn, chat_id, pid)
+            return
+
+    # Ответ (reply) на карточку проекта: удалить / переименовать / обновить описание.
     if text and not text.startswith("/") and reply_to.get("message_id"):
         proj_row = project_by_desc_msg(conn, int(reply_to["message_id"]))
         if proj_row:
@@ -2126,6 +2240,7 @@ def set_my_commands() -> None:
         {"command": "inv", "description": "🔍 Инвентаризация"},
         {"command": "edit", "description": "✏️ Изменить позицию"},
         {"command": "projects", "description": "🛠 Проекты"},
+        {"command": "newproject", "description": "🆕 Создать проект"},
         {"command": "start", "description": "ℹ️ Справка"},
     ]
     try:
