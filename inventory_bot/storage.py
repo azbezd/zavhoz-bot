@@ -923,6 +923,31 @@ def apply_proposal(conn, proposal_id: int) -> dict:
                 )
             applied.append({"op": op_name, "item_id": item_id})
 
+        elif op_name == "update_item":
+            if not item_id or not get_item(conn, item_id):
+                applied.append({"op": op_name, "result": "item not found", "item_id": item_id})
+                continue
+            sets, vals = [], []
+            cur = get_item(conn, item_id)
+            if name and name != cur["name"] and name != "Unnamed item":
+                sets.append("name = ?"); vals.append(name)
+            if op.get("category") and category != "unknown" and category != cur["category"]:
+                sets.append("category = ?"); vals.append(category)
+            if op.get("description"):
+                sets.append("description = ?"); vals.append(op["description"])
+            if op.get("status") and status != cur["status"]:
+                sets.append("status = ?"); vals.append(status)
+            if notes:
+                # Заметку дописываем, а не перетираем.
+                stamp = now[:10]
+                old = (cur["notes"] or "").strip()
+                vals.append((old + "\n" if old else "") + f"[{stamp}] {notes}")
+                sets.append("notes = ?")
+            if sets:
+                sets.append("updated_at = ?"); vals.append(now); vals.append(item_id)
+                conn.execute(f"UPDATE items SET {', '.join(sets)} WHERE id = ?", vals)
+            applied.append({"op": op_name, "item_id": item_id, "changed": [s.split(' =')[0] for s in sets if '=' in s]})
+
         elif op_name == "adjust_qty":
             if not item_id:
                 raise ValueError("adjust_qty requires item_id")

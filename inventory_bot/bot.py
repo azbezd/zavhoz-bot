@@ -187,6 +187,19 @@ def item_web_url(item_id: str) -> str:
     return f"{SITE_BASE}/item/{item_id}.html"
 
 
+def _inventory_id_snapshot(conn, limit: int = 200) -> str:
+    """Список позиций 'id | название | количество' — чтобы модель ссылалась на существующие."""
+    rows = conn.execute(
+        "SELECT id, name, available_qty, total_qty, unit FROM items WHERE status != 'retired' ORDER BY category, name LIMIT ?",
+        (limit,),
+    ).fetchall()
+    lines = []
+    for r in rows:
+        q = f"{r['available_qty']:g}" if r["available_qty"] == r["total_qty"] else f"{r['available_qty']:g}/{r['total_qty']:g}"
+        lines.append(f"{r['id']} | {r['name']} | {q} {r['unit'] or 'шт'}")
+    return "\n".join(lines)
+
+
 def token() -> str:
     value = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     if not value:
@@ -2074,7 +2087,7 @@ def handle_message(conn, message: dict) -> None:
             send_chat_action(chat_id, "typing")
             combined = (row["message_text"] or "") + "\n\nУточнение от пользователя: " + text
             try:
-                proposal = extract_inventory_proposal(combined, [])
+                proposal = extract_inventory_proposal(combined, [], _inventory_id_snapshot(conn))
             except Exception as exc:
                 send(chat_id, f"Уточнение принял, но пересобрать черновик не вышло: {exc}")
                 return
@@ -2249,7 +2262,7 @@ def handle_message(conn, message: dict) -> None:
         send_chat_action(chat_id, "typing")
         send(chat_id, "Понял, похоже на изменение склада. Сейчас соберу черновик, ничего сам не запишу без подтверждения.")
         try:
-            proposal = extract_inventory_proposal(text, [os.path.join(repo_dir, path) for path in photo_paths])
+            proposal = extract_inventory_proposal(text, [os.path.join(repo_dir, path) for path in photo_paths], _inventory_id_snapshot(conn))
             ops = proposal.get("operations", [])
             if ops and all(o.get("op") == "ask_user" for o in ops):
                 # Нечего применять — просто спросим, без черновика и кнопок.

@@ -28,8 +28,20 @@ Marketplace links (ozon, wildberries, aliexpress, avito) rot quickly and listing
 use such a link only to extract the item name, price and photo at add time, but DO NOT store it
 in source_url — leave source_url empty unless it is a stable vendor/manufacturer page
 (amperkot.ru, chipdip.ru, datasheet sites). Price is optional: use 0 when unknown, never guess.
+ВАЖНО про существующие позиции: ниже даётся список склада в виде "id | название | количество".
+Если сообщение МЕНЯЕТ уже существующую позицию (сломал/модифицировал/переименовать/уточнить описание/
+изменить количество/поставил в проект/потерял) — НЕ создавай новую через add_item.
+Найди подходящую позицию в списке и используй её item_id:
+- update_item: изменить название/категорию/описание/заметку/статус существующей позиции
+  (например «плата теперь без дисплея» → update_item с новым name и description). Заполни item_id и
+  только меняющиеся поля (name — новое полное название; description — новое описание; notes — заметка).
+- adjust_qty: только изменить количество существующей позиции.
+- mark_used: поставить позицию в проект.
+add_item — ТОЛЬКО для действительно новых позиций, которых нет в списке.
+
 Supported operations:
 - add_item: add a new owned item or wishlist item
+- update_item: change name/category/description/notes/status of an EXISTING item (by item_id)
 - adjust_qty: increase/decrease quantity of an existing item
 - mark_used: reserve or use an item in a project
 - add_photo: attach a photo to an item
@@ -60,6 +72,7 @@ JSON_SCHEMA = {
                         "location",
                         "project_id",
                         "notes",
+                        "description",
                         "question",
                         "status",
                         "source_title",
@@ -72,11 +85,12 @@ JSON_SCHEMA = {
                     "properties": {
                         "op": {
                             "type": "string",
-                            "enum": ["add_item", "adjust_qty", "mark_used", "add_photo", "ask_user"],
+                            "enum": ["add_item", "update_item", "adjust_qty", "mark_used", "add_photo", "ask_user"],
                         },
                         "item_id": {"type": "string"},
                         "name": {"type": "string"},
                         "category": {"type": "string"},
+                        "description": {"type": "string"},
                         "qty": {"type": "number"},
                         "unit": {"type": "string"},
                         "location": {"type": "string"},
@@ -339,7 +353,7 @@ def _data_url(path: str) -> str:
     return f"data:{mime};base64,{encoded}"
 
 
-def extract_inventory_proposal(text: str, photo_paths: list[str]) -> dict:
+def extract_inventory_proposal(text: str, photo_paths: list[str], inventory_context: str = "") -> dict:
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         return {
@@ -355,6 +369,7 @@ def extract_inventory_proposal(text: str, photo_paths: list[str]) -> dict:
                     "location": "",
                     "project_id": "",
                     "notes": "",
+                    "description": "",
                     "question": "OpenAI API key is not configured on the server.",
                     "status": "stock",
                     "source_title": "",
@@ -368,7 +383,10 @@ def extract_inventory_proposal(text: str, photo_paths: list[str]) -> dict:
         }
 
     model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
-    content = [{"type": "input_text", "text": text or "User sent inventory photo(s)."}]
+    user_text = text or "User sent inventory photo(s)."
+    if inventory_context:
+        user_text += "\n\nСуществующие позиции склада (id | название | количество):\n" + inventory_context
+    content = [{"type": "input_text", "text": user_text}]
     for path in photo_paths:
         content.append({"type": "input_image", "image_url": _data_url(path), "detail": "high"})
 
