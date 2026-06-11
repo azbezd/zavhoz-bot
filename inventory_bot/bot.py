@@ -178,6 +178,11 @@ except ImportError:
 
 
 API_BASE = "https://api.telegram.org"
+SITE_BASE = os.environ.get("ZAVHOZ_SITE_BASE", "https://azbezd.github.io/zavhoz-web")
+
+
+def item_web_url(item_id: str) -> str:
+    return f"{SITE_BASE}/item/{item_id}.html"
 
 
 def token() -> str:
@@ -313,8 +318,8 @@ def _item_qty_text(row) -> str:
 
 def _item_li(row) -> str:
     name = html_escape(_typo(row["name"]))
-    src_url = row["source_url"] if "source_url" in row.keys() else None
-    name_part = f'<a href="{html_escape(src_url)}">{name}</a>' if src_url else name
+    # Имя ведёт на нашу страницу-карточку (не протухает); ссылка на магазин — внутри неё.
+    name_part = f'<a href="{html_escape(item_web_url(row["id"]))}">{name}</a>'
     projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
     proj_part = f"  ·  🔧{NBSP}{html_escape(projects_csv)}" if projects_csv else ""
     return f"<li>{name_part} — {_item_qty_text(row)}{proj_part}</li>"
@@ -553,7 +558,8 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
             "🔍 /inv — инвентаризация: всё управление кнопками (пропустить, к пропущенным, завершить)\n"
             "✏️ /edit — точечно изменить позицию из списка\n"
             "🛠 /projects — проекты\n\n"
-            "Экспорт склада в GitHub — автоматический после любых изменений."
+            "📖 Витрина склада в вебе: " + SITE_BASE + "\n"
+            "Экспорт и сайт обновляются автоматически после изменений."
         )
         send(chat_id, msg)
         remember_chat(conn, user_id, "assistant", msg)
@@ -1009,6 +1015,7 @@ def _inv_show_item(conn, chat_id: int, user_id: int, item) -> None:
         lines.append(f"💰 {price:g}{NBSP}₽")
     if src_url:
         lines.append(f'🔗 <a href="{html_escape(src_url)}">{html_escape(src_title or "источник")}</a>')
+    lines.append(f'📖 <a href="{html_escape(item_web_url(item["id"]))}">карточка в вебе</a>')
     caption = "\n".join(lines)
     photo = item_first_photo(conn, item["id"])
     kb = _inv_keyboard(item["id"], skipped_count=len(skipped), pass_no=pass_no)
