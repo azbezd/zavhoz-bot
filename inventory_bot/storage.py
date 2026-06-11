@@ -801,17 +801,21 @@ def apply_proposal(conn, proposal_id: int) -> dict:
         if op_name == "add_item":
             if not item_id:
                 item_id = next_item_id(conn)
+            price_rub = float(op.get("price_rub") or 0)
             conn.execute(
                 """
                 INSERT OR IGNORE INTO items (
                   id, name, category, status, total_qty, available_qty, unit,
-                  location, notes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  location, notes, price_rub, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (item_id, name, category, status, qty, qty if status != "ordered" else 0, unit, location, notes, now, now),
+                (item_id, name, category, status, qty, qty if status != "ordered" else 0, unit, location, notes, price_rub, now, now),
             )
             for path in photo_paths:
                 conn.execute("INSERT OR IGNORE INTO item_photos (item_id, path) VALUES (?, ?)", (item_id, path))
+            image_url = op.get("image_url") or ""
+            if image_url and not photo_paths:
+                conn.execute("INSERT OR IGNORE INTO item_photos (item_id, path) VALUES (?, ?)", (item_id, image_url))
             if source_url:
                 conn.execute(
                     "INSERT OR IGNORE INTO item_sources (item_id, kind, title, url, notes) VALUES (?, 'purchase_or_reference', ?, ?, ?)",

@@ -194,6 +194,29 @@ def extract_device_layout(text: str, project_names: list) -> list:
     raise RuntimeError("layout: no output_text in response")
 
 
+def scrape_amperkot(url: str) -> dict:
+    """Снять имя/цену/фото с карточки amperkot.ru без участия модели."""
+    import re, html as _html
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        page = resp.read().decode("utf-8", "replace")
+    name = ""
+    m = re.search(r"<title>(.*?)</title>", page, re.S)
+    if m:
+        name = _html.unescape(m.group(1)).strip()
+        name = re.sub(r"^(Купить|Заказать)\s+", "", name, flags=re.IGNORECASE).strip()
+    price = 0
+    for pat in (r'"price"\s*:\s*"?(\d+)', r'itemprop="price"[^>]*content="(\d+)', r'(\d+)\s*(?:&#8381|₽)'):
+        pm = re.search(pat, page)
+        if pm:
+            price = int(pm.group(1)); break
+    image = ""
+    im = re.search(r'og:image"\s+content="([^"]+)"', page) or re.search(r'"image"\s*:\s*"([^"]+)"', page)
+    if im:
+        image = im.group(1).replace("\\/", "/")
+    return {"name": name, "price": price, "image": image, "url": url}
+
+
 def _data_url(path: str) -> str:
     mime, _ = mimetypes.guess_type(path)
     if not mime:

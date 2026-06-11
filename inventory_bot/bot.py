@@ -28,7 +28,7 @@ socket.getaddrinfo = _ipv6_first_getaddrinfo
 try:
     from .export_inventory import export_items, maybe_git_sync
     from .openai_chat import chat_reply, chat_reply_stream, classify_inv_intent, stock_rows_query as classify_stock_rows
-    from .openai_extract import extract_device_layout, extract_inventory_proposal
+    from .openai_extract import extract_device_layout, extract_inventory_proposal, scrape_amperkot
     from .storage import (
         apply_proposal,
         categories_with_counts,
@@ -99,7 +99,7 @@ try:
 except ImportError:
     from export_inventory import export_items, maybe_git_sync
     from openai_chat import chat_reply, chat_reply_stream, classify_inv_intent, stock_rows_query as classify_stock_rows
-    from openai_extract import extract_device_layout, extract_inventory_proposal
+    from openai_extract import extract_device_layout, extract_inventory_proposal, scrape_amperkot
     from storage import (
         apply_proposal,
         categories_with_counts,
@@ -1523,6 +1523,31 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         send(chat_id, "Не понял. Нажми кнопку под карточкой или напиши число/«есть»/«нет».")
 
 
+def _add_from_amperkot(conn, chat_id: int, user_id: int, url: str) -> None:
+    """Завести позицию по карточке amperkot: имя/цена/фото со страницы, потом черновик."""
+    data = scrape_amperkot(url)
+    name = data["name"] or "Товар с amperkot"
+    proposal = {
+        "summary": f"Добавить с amperkot: {name}",
+        "operations": [{
+            "op": "add_item", "item_id": "", "name": name, "category": "module",
+            "qty": 1, "unit": "pcs", "location": "unsorted", "project_id": "",
+            "notes": "", "question": "", "status": "stock",
+            "source_title": "amperkot.ru", "source_url": url, "source_notes": "",
+            "knowledge_summary": "", "specs": "{}", "confidence": "high",
+            "price_rub": data["price"], "image_url": data["image"],
+        }],
+    }
+    proposal_id = save_proposal(conn, user_id, chat_id, f"amperkot: {url}", [], proposal)
+    if data["image"]:
+        try:
+            send_photo(chat_id, data["image"], f"<b>{html_escape(name)}</b>\n💰 {data['price'] or '—'}{NBSP}₽")
+        except Exception:
+            pass
+    remember_chat(conn, user_id, "assistant", proposal["summary"])
+    _send_proposal(conn, chat_id, proposal_id, proposal)
+
+
 def _looks_like_stock_question(text: str) -> bool:
     low = text.lower().strip()
     starts = ("сколько", "какие", "какой", "какая", "что есть", "что у меня", "есть ли", "что за")
@@ -1929,6 +1954,17 @@ def handle_message(conn, message: dict) -> None:
 
     print(f"step: remember user msg", flush=True)
     remember_chat(conn, user_id, "user", text or "[photo]")
+    # Ссылка на amperkot.ru = добавить позицию по карточке магазина (без участия модели).
+    amperkot = re.search(r"https?://(?:www\.)?amperkot\.ru/\S+", text or "")
+    if amperkot and not photo_paths:
+        print("step: route=amperkot-url", flush=True)
+        send_chat_action(chat_id, "typing")
+        try:
+            _add_from_amperkot(conn, chat_id, user_id, amperkot.group(0))
+        except Exception as exc:
+            print(f"amperkot scrape error: {exc}", flush=True)
+            send(chat_id, f"Не смог снять карточку с amperkot: {exc}. Пришли название, цену и фото — заведу руками.")
+        return
     if text and not photo_paths and _looks_like_device_layout(conn, text):
         print("step: route=layout", flush=True)
         _layout_start(conn, chat_id, user_id, text)
