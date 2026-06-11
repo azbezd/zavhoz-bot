@@ -1917,6 +1917,25 @@ def handle_message(conn, message: dict) -> None:
             _send_proposal(conn, chat_id, new_id, proposal)
             return
 
+    # Короткое подтверждение при висящем черновике = применить последний черновик.
+    if text and not text.startswith("/"):
+        low = text.strip().lower().rstrip("!.")
+        if low in ("добавь", "добавляй", "применяй", "применить", "применяй давай", "да", "ок", "окей", "давай", "го"):
+            pend = conn.execute(
+                "SELECT id FROM proposals WHERE telegram_user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            if pend:
+                repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
+                try:
+                    result = apply_proposal(conn, pend["id"])
+                    export_items(repo_dir)
+                    maybe_git_sync(repo_dir, f"apply telegram proposal {pend['id']}")
+                    send(chat_id, "Готово, внёс в склад:\n" + json.dumps(result, ensure_ascii=False, indent=2))
+                except Exception as exc:
+                    send(chat_id, f"Не получилось применить черновик #{pend['id']}: {exc}")
+                return
+
     # Активная раскладка устройств: текст = уточнение к текущему пункту.
     lay_queue, lay_pos = layout_get(conn, user_id)
     if lay_queue is not None and text and not text.startswith("/"):
