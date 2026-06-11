@@ -316,12 +316,15 @@ def _render_stock_list(conn, chat_id: int, rows) -> None:
         groups.setdefault(row["category"] or "other", []).append(row)
     order = [c for c in CATEGORY_LABELS if c in groups] + [c for c in groups if c not in CATEGORY_LABELS]
 
-    parts = [f"<h3>📋 Склад · {len(rows)} позиций</h3>"]
+    # Маленькие группы раскрыты сразу, большие — свёрнуты (тап разворачивает).
+    OPEN_LIMIT = 4
+    parts = [f"<h3>📋 Склад · {len(rows)} позиций · {len(order)} групп</h3>"]
     for cat in order:
         items = groups[cat]
         label = CATEGORY_LABELS.get(cat, html_escape(cat))
-        parts.append(f"<h4>{label} · {len(items)}</h4>")
-        parts.append("<ul>" + "".join(_item_li(r) for r in items) + "</ul>")
+        body = "<ul>" + "".join(_item_li(r) for r in items) + "</ul>"
+        open_attr = " open" if len(items) <= OPEN_LIMIT else ""
+        parts.append(f"<details{open_attr}><summary>{label} · {len(items)}</summary>{body}</details>")
     if send_rich(chat_id, "".join(parts)) is not None:
         return
 
@@ -810,13 +813,15 @@ def _projects_overview(conn, chat_id: int) -> None:
     if not projects:
         send(chat_id, "Проекты пока не заведены.")
         return
-    parts = ["<h3>🛠 Проекты</h3>"]
+    parts = [f"<h3>🛠 Проекты · {len(projects)}</h3>"]
     btn_row, rows = [], []
     for proj in projects:
         items = project_items(conn, proj["id"])
         desc = f" — <i>{html_escape(proj['description'])}</i>" if proj["description"] else ""
-        parts.append(f"<h4>{html_escape(proj['name'])}{desc}</h4>")
-        parts.append(_project_composition_rich(items))
+        summary = f"{html_escape(proj['name'])} · {len(items)} деталей"
+        parts.append(f"<details><summary>{summary}</summary>"
+                     + (f"<p><i>{html_escape(proj['description'])}</i></p>" if proj["description"] else "")
+                     + _project_composition_rich(items) + "</details>")
         btn_row.append({"text": proj["name"], "callback_data": f"prj:show:{proj['id']}"})
         if len(btn_row) == 2:
             rows.append(btn_row)
