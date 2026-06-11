@@ -194,6 +194,41 @@ def extract_device_layout(text: str, project_names: list) -> list:
     raise RuntimeError("layout: no output_text in response")
 
 
+def describe_photo(photo_path: str, question: str) -> str:
+    """Ответ на вопрос о фото (что это за деталь и т.п.) — без черновиков."""
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("no OPENAI_API_KEY")
+    model = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
+    payload = {
+        "model": model,
+        "input": [
+            {"role": "system", "content": [{"type": "input_text", "text":
+                "Ты помощник по электронике. Отвечай по-русски, кратко и конкретно. "
+                "Если узнаёшь деталь — назови её точно (маркировка, назначение)."}]},
+            {"role": "user", "content": [
+                {"type": "input_text", "text": question or "Что это за деталь?"},
+                {"type": "input_image", "image_url": _data_url(photo_path), "detail": "high"},
+            ]},
+        ],
+    }
+    base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    req = urllib.request.Request(
+        f"{base_url}/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=90) as resp:
+        raw = json.loads(resp.read().decode("utf-8"))
+    parts = []
+    for output in raw.get("output", []):
+        for part in output.get("content", []):
+            if part.get("type") == "output_text":
+                parts.append(part.get("text", ""))
+    return "\n".join(parts).strip() or "Не разглядел. Пришли фото поближе/при свете."
+
+
 def scrape_amperkot(url: str) -> dict:
     """Снять имя/цену/фото с карточки amperkot.ru без участия модели."""
     import re, html as _html

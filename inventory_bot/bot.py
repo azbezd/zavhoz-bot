@@ -5,7 +5,7 @@ import socket
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 # Force IPv6-only resolution for hosts where IPv4 is slow/unreliable from this VPS.
@@ -28,7 +28,7 @@ socket.getaddrinfo = _ipv6_first_getaddrinfo
 try:
     from .export_inventory import export_items, maybe_git_sync
     from .openai_chat import chat_reply, chat_reply_stream, classify_inv_intent, stock_rows_query as classify_stock_rows
-    from .openai_extract import extract_device_layout, extract_inventory_proposal, scrape_amperkot
+    from .openai_extract import describe_photo, extract_device_layout, extract_inventory_proposal, scrape_amperkot
     from .storage import (
         apply_proposal,
         categories_with_counts,
@@ -99,7 +99,7 @@ try:
 except ImportError:
     from export_inventory import export_items, maybe_git_sync
     from openai_chat import chat_reply, chat_reply_stream, classify_inv_intent, stock_rows_query as classify_stock_rows
-    from openai_extract import extract_device_layout, extract_inventory_proposal, scrape_amperkot
+    from openai_extract import describe_photo, extract_device_layout, extract_inventory_proposal, scrape_amperkot
     from storage import (
         apply_proposal,
         categories_with_counts,
@@ -1560,7 +1560,7 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         send(chat_id, "Не понял. Нажми кнопку под карточкой или напиши число/«есть»/«нет».")
 
 
-def _add_from_amperkot(conn, chat_id: int, user_id: int, url: str) -> None:
+def _add_from_amperkot(conn, chat_id: int, user_id: int, url: str, qty: int = 1) -> None:
     """Завести позицию по карточке amperkot: имя/цена/фото со страницы, потом черновик."""
     data = scrape_amperkot(url)
     name = data["name"] or "Товар с amperkot"
@@ -1568,7 +1568,7 @@ def _add_from_amperkot(conn, chat_id: int, user_id: int, url: str) -> None:
         "summary": f"Добавить с amperkot: {name}",
         "operations": [{
             "op": "add_item", "item_id": "", "name": name, "category": "module",
-            "qty": 1, "unit": "pcs", "location": "unsorted", "project_id": "",
+            "qty": qty, "unit": "pcs", "location": "unsorted", "project_id": "",
             "notes": "", "question": "", "status": "stock",
             "source_title": "amperkot.ru", "source_url": url, "source_notes": "",
             "knowledge_summary": "", "specs": "{}", "confidence": "high",
@@ -1917,20 +1917,46 @@ def handle_message(conn, message: dict) -> None:
             except Exception as exc:
                 send(chat_id, f"Уточнение принял, но пересобрать черновик не вышло: {exc}")
                 return
+            # Скрейпленные поля (цена/фото/источник) не должны теряться при правке.
+            try:
+                old_ops = json.loads(conn.execute(
+                    "SELECT proposal_json FROM proposals WHERE id = ?", (row["id"],)
+                ).fetchone()["proposal_json"]).get("operations", [])
+                donor = next((o for o in old_ops if o.get("op") == "add_item"
+                              and (o.get("price_rub") or o.get("image_url"))), None)
+                if donor:
+                    for op in proposal.get("operations", []):
+                        if op.get("op") == "add_item":
+                            for f in ("price_rub", "image_url", "source_url", "source_title"):
+                                if not op.get(f) and donor.get(f):
+                                    op[f] = donor[f]
+            except Exception as exc:
+                print(f"draft field carry-over error: {exc}", flush=True)
+            ops = proposal.get("operations", [])
+            if ops and all(o.get("op") == "ask_user" for o in ops):
+                q = "; ".join(filter(None, (o.get("question") for o in ops))) or "Уточни, что именно добавить."
+                send(chat_id, q)
+                return
             discard_proposal(conn, row["id"])
             new_id = save_proposal(conn, user_id, chat_id, combined, [], proposal)
             _send_proposal(conn, chat_id, new_id, proposal)
             return
 
     # Короткое подтверждение при висящем черновике = применить последний черновик.
+    # «добавь/применяй» работают час; неоднозначные «да/ок/давай» — только 10 минут,
+    # чтобы случайный ответ в разговоре не применил забытый черновик.
     if text and not text.startswith("/"):
         low = text.strip().lower().rstrip("!.")
-        if low in ("добавь", "добавляй", "применяй", "применить", "применяй давай", "да", "ок", "окей", "давай", "го"):
+        strong = low in ("добавь", "добавляй", "применяй", "применить", "применяй давай")
+        weak = low in ("да", "ок", "окей", "давай", "го")
+        if strong or weak:
             pend = conn.execute(
-                "SELECT id FROM proposals WHERE telegram_user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
+                "SELECT id, created_at FROM proposals WHERE telegram_user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
                 (user_id,),
             ).fetchone()
-            if pend:
+            max_age = timedelta(minutes=60 if strong else 10)
+            fresh = pend and pend["created_at"] >= (datetime.now(timezone.utc) - max_age).replace(microsecond=0).isoformat()
+            if fresh:
                 repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
                 try:
                     result = apply_proposal(conn, pend["id"])
@@ -1939,6 +1965,10 @@ def handle_message(conn, message: dict) -> None:
                     send(chat_id, "Готово, внёс в склад:\n" + json.dumps(result, ensure_ascii=False, indent=2))
                 except Exception as exc:
                     send(chat_id, f"Не получилось применить черновик #{pend['id']}: {exc}")
+                return
+            if strong:
+                send(chat_id, "Свежего черновика нет. Скажи, что добавить: название и количество, "
+                              "либо пришли ссылку на amperkot или фото.")
                 return
 
     # Активная раскладка устройств: текст = уточнение к текущему пункту.
@@ -1953,6 +1983,12 @@ def handle_message(conn, message: dict) -> None:
 
     # Inventory mode: free-form replies, numbers and photos apply to the current card.
     sess = inv_get(conn, user_id)
+    # Брошенная pick-карточка не должна перехватывать чужие сообщения вечно.
+    if sess and sess["mode"] == "pick":
+        stale_at = (datetime.now(timezone.utc) - timedelta(minutes=30)).replace(microsecond=0).isoformat()
+        if sess["last_action_at"] < stale_at:
+            inv_finish(conn, user_id)
+            sess = None
     if sess and text and not text.startswith("/") and not message.get("photo"):
         if _handle_inv_text(conn, chat_id, user_id, sess, text):
             return
@@ -2005,17 +2041,43 @@ def handle_message(conn, message: dict) -> None:
 
     print(f"step: remember user msg", flush=True)
     remember_chat(conn, user_id, "user", text or "[photo]")
+    # Фото с вопросом — это распознавание, а не изменение склада.
+    if photo_paths and text and ("?" in text or text.lower().startswith(
+            ("что", "какая", "какой", "какие", "как", "зачем", "почему", "узнай", "распознай", "определи"))):
+        print("step: route=photo-question", flush=True)
+        send_chat_action(chat_id, "typing")
+        try:
+            answer = describe_photo(os.path.join(repo_dir, photo_paths[0]), text)
+        except Exception as exc:
+            answer = f"Не смог разобрать фото: {exc}"
+        remember_chat(conn, user_id, "assistant", answer)
+        send(chat_id, answer)
+        return
     # Ссылка на amperkot.ru = добавить позицию по карточке магазина (без участия модели).
     amperkot = re.search(r"https?://(?:www\.)?amperkot\.ru/\S+", text or "")
     if amperkot and not photo_paths:
         print("step: route=amperkot-url", flush=True)
         send_chat_action(chat_id, "typing")
+        qty_m = re.search(r"(\d+)\s*шт", text or "")
         try:
-            _add_from_amperkot(conn, chat_id, user_id, amperkot.group(0))
+            _add_from_amperkot(conn, chat_id, user_id, amperkot.group(0), qty=int(qty_m.group(1)) if qty_m else 1)
         except Exception as exc:
             print(f"amperkot scrape error: {exc}", flush=True)
             send(chat_id, f"Не смог снять карточку с amperkot: {exc}. Пришли название, цену и фото — заведу руками.")
         return
+
+    # Маркетплейсы (озон и т.п.): карточку с сервера не достать (защита от ботов),
+    # ссылки протухают и не хранятся. Разбираем текст вокруг ссылки, либо просим описание.
+    market = re.search(r"https?://(?:www\.)?(ozon\.ru|wildberries\.ru|wb\.ru|aliexpress\.[a-z.]+|avito\.ru)/\S+", text or "")
+    if market and not photo_paths:
+        rest = (text.replace(market.group(0), "").strip(" \n,—-"))
+        if len(rest) >= 12:
+            text = rest  # дальше обычный разбор «купил…» уже без ссылки
+        else:
+            host = market.group(1)
+            send(chat_id, f"Карточку с {host} вытащить не могу — пришли название (и цену, если важна) "
+                          "текстом или скрин карточки, заведу черновиком.")
+            return
     if text and not photo_paths and _looks_like_device_layout(conn, text):
         print("step: route=layout", flush=True)
         _layout_start(conn, chat_id, user_id, text)
@@ -2026,6 +2088,13 @@ def handle_message(conn, message: dict) -> None:
         send(chat_id, "Понял, похоже на изменение склада. Сейчас соберу черновик, ничего сам не запишу без подтверждения.")
         try:
             proposal = extract_inventory_proposal(text, [os.path.join(repo_dir, path) for path in photo_paths])
+            ops = proposal.get("operations", [])
+            if ops and all(o.get("op") == "ask_user" for o in ops):
+                # Нечего применять — просто спросим, без черновика и кнопок.
+                q = "; ".join(filter(None, (o.get("question") for o in ops))) or "Уточни, что именно добавить."
+                remember_chat(conn, user_id, "assistant", q)
+                send(chat_id, q)
+                return
             proposal_id = save_proposal(conn, user_id, chat_id, text, photo_paths, proposal)
             remember_chat(conn, user_id, "assistant", format_proposal(proposal_id, proposal))
             _send_proposal(conn, chat_id, proposal_id, proposal)

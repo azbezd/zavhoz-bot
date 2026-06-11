@@ -148,6 +148,12 @@ def seed_items_from_yaml(conn, repo_dir: str) -> int:
 
 
 def save_proposal(conn, user_id: int, chat_id: int, text: str, photo_paths: list[str], proposal: dict) -> int:
+    # Один активный черновик на пользователя: новый вытесняет старые,
+    # чтобы случайное «да» через день не применило забытое.
+    conn.execute(
+        "UPDATE proposals SET status = 'discarded' WHERE telegram_user_id = ? AND status = 'pending'",
+        (user_id,),
+    )
     cur = conn.execute(
         """
         INSERT INTO proposals (
