@@ -526,21 +526,47 @@ def download_file(file_id: str, dest_dir: str) -> str:
     return repo_rel
 
 
-def format_proposal(proposal_id: int, proposal: dict) -> str:
-    lines = [f"Черновик #{proposal_id}", proposal.get("summary", "")]
+def format_proposal(conn, proposal_id: int, proposal: dict) -> str:
+    """Человекочитаемый черновик: для существующих позиций показываем имя и было→станет."""
+    lines = [f"Черновик #{proposal_id}", proposal.get("summary", ""), ""]
     for idx, op in enumerate(proposal.get("operations", []), start=1):
-        lines.append(
-            f"{idx}. {op.get('op')} | {op.get('name') or op.get('item_id') or '-'} | "
-            f"{op.get('qty')} {op.get('unit') or ''} | {op.get('status') or '-'} | {op.get('location') or '-'}"
-        )
-        if op.get("knowledge_summary"):
-            lines.append(f"   кратко: {op.get('knowledge_summary')}")
+        kind = op.get("op")
+        cur = get_item(conn, op.get("item_id")) if op.get("item_id") else None
+        unit = op.get("unit") or (cur["unit"] if cur else "шт")
+        qty = op.get("qty") or 0
+        if kind == "add_item":
+            line = f"{idx}. ➕ Добавить: {op.get('name', '?')} — {qty:g} {unit}"
+            if op.get("price_rub"):
+                line += f", {op['price_rub']:g} ₽"
+        elif kind == "update_item":
+            tgt = cur["name"] if cur else (op.get("item_id") or "?")
+            changes = []
+            if op.get("name") and (not cur or op["name"] != cur["name"]):
+                changes.append(f"имя → «{op['name']}»")
+            if op.get("description"):
+                changes.append("описание")
+            if op.get("notes"):
+                changes.append(f"заметка: {op['notes']}")
+            line = f"{idx}. ✏️ Изменить «{tgt}»: " + (", ".join(changes) or "—")
+        elif kind == "adjust_qty":
+            if cur:
+                line = f"{idx}. 🔢 {cur['name']}: было {cur['total_qty']:g} → станет {cur['total_qty'] + qty:g} {unit}"
+            else:
+                line = f"{idx}. 🔢 +{qty:g} {unit} (позиция не опознана!)"
+        elif kind == "mark_used":
+            tgt = cur["name"] if cur else (op.get("item_id") or "?")
+            line = f"{idx}. 🔧 {tgt} → в проект {op.get('project_id', '?')} ({qty:g} {unit})"
+        elif kind == "add_photo":
+            line = f"{idx}. 📷 фото к {cur['name'] if cur else op.get('item_id', '?')}"
+        elif kind == "ask_user":
+            line = f"{idx}. ❓ {op.get('question', 'уточни')}"
+        else:
+            line = f"{idx}. {kind} | {op.get('name') or op.get('item_id') or '-'}"
+        lines.append(line)
         if op.get("source_url"):
             lines.append(f"   источник: {op.get('source_title') or 'source'} — {op.get('source_url')}")
-        if op.get("question"):
-            lines.append(f"   вопрос: {op.get('question')}")
     lines.append("")
-    lines.append("Ответь на это сообщение текстом — поправлю черновик.")
+    lines.append("Применить кнопкой ниже, или ответь текстом — поправлю.")
     return "\n".join(lines)
 
 
@@ -549,7 +575,7 @@ def _send_proposal(conn, chat_id: int, proposal_id: int, proposal: dict) -> None
         {"text": "✅ Применить", "callback_data": f"prop:yes:{proposal_id}"},
         {"text": "🗑 Отменить", "callback_data": f"prop:no:{proposal_id}"},
     ]]}
-    msg_id = send_with_keyboard(chat_id, html_escape(format_proposal(proposal_id, proposal)), kb)
+    msg_id = send_with_keyboard(chat_id, html_escape(format_proposal(conn, proposal_id, proposal)), kb)
     if msg_id:
         conn.execute("UPDATE proposals SET draft_message_id = ? WHERE id = ?", (msg_id, proposal_id))
         conn.commit()
@@ -661,7 +687,7 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
         if not row:
             send(chat_id, "Proposal not found.")
             return
-        send(chat_id, format_proposal(row["id"], json.loads(row["proposal_json"])))
+        send(chat_id, format_proposal(conn, row["id"], json.loads(row["proposal_json"])))
     elif cmd == "/discard" and len(parts) == 2:
         ok = discard_proposal(conn, int(parts[1]))
         send(chat_id, "Ок, выкинул черновик." if ok else "Такого активного черновика нет.")
@@ -2309,7 +2335,7 @@ def handle_message(conn, message: dict) -> None:
                 send(chat_id, q)
                 return
             proposal_id = save_proposal(conn, user_id, chat_id, text, photo_paths, proposal)
-            remember_chat(conn, user_id, "assistant", format_proposal(proposal_id, proposal))
+            remember_chat(conn, user_id, "assistant", format_proposal(conn, proposal_id, proposal))
             _send_proposal(conn, chat_id, proposal_id, proposal)
         except Exception as exc:
             reply = (

@@ -39,6 +39,14 @@ in source_url — leave source_url empty unless it is a stable vendor/manufactur
 - mark_used: поставить позицию в проект.
 add_item — ТОЛЬКО для действительно новых позиций, которых нет в списке.
 
+ОЧЕНЬ ВАЖНО при разборе фото заказа/чека:
+- Бери количество ТОЧНО как на картинке (если «×2» — это 2, не 1).
+- Похожие, но РАЗНЫЕ позиции не путай: провода «Папа-мама», «Мама-мама», «Папа-Папа» —
+  это ТРИ разных типа; разная длина (10 см ≠ 30 см) — тоже разные позиции. Совпадение
+  засчитывай только при полном совпадении типа И длины. Иначе это новая позиция (add_item).
+- Если не уверен, что это та же позиция из списка — лучше add_item или ask_user, чем
+  ошибочно прибавить количество к чужой позиции.
+
 Supported operations:
 - add_item: add a new owned item or wishlist item
 - update_item: change name/category/description/notes/status of an EXISTING item (by item_id)
