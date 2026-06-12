@@ -884,12 +884,14 @@ def apply_proposal(conn, proposal_id: int) -> dict:
         knowledge_summary = op.get("knowledge_summary") or ""
 
         if op_name == "add_item":
-            if not item_id:
+            # id назначаем сами: модель иногда выдумывает item_id, который может
+            # совпасть с существующим — тогда новая позиция молча потерялась бы.
+            if not item_id or get_item(conn, item_id):
                 item_id = next_item_id(conn)
             price_rub = float(op.get("price_rub") or 0)
             conn.execute(
                 """
-                INSERT OR IGNORE INTO items (
+                INSERT INTO items (
                   id, name, category, status, total_qty, available_qty, unit,
                   location, notes, price_rub, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
