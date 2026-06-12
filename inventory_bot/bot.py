@@ -1797,8 +1797,16 @@ def _add_from_amperkot(conn, chat_id: int, user_id: int, url: str, qty: int = 1)
 
 def _looks_like_stock_question(text: str) -> bool:
     low = text.lower().strip()
-    starts = ("сколько", "какие", "какой", "какая", "что есть", "что у меня", "есть ли", "что за")
-    return low.startswith(starts)
+    starts = ("сколько", "какие", "какой", "какая", "что есть", "что у меня", "есть ли",
+              "что за", "найди", "покажи", "есть у", "имеется")
+    if low.startswith(starts):
+        return True
+    # «<деталь> есть?», «… в наличии?», «… имеется?» — вопрос о наличии в любой форме.
+    cues = ("есть ли", "у нас есть", "у меня есть", "в наличии", "имеется")
+    if any(c in low for c in cues):
+        return True
+    stripped = low.rstrip("?!. )")
+    return stripped.endswith(("есть", "имеется", "в наличии", "остался", "осталось", "остались"))
 
 
 def _answer_stock_question(conn, chat_id: int, text: str) -> bool:
@@ -1823,11 +1831,24 @@ def _answer_stock_question(conn, chat_id: int, text: str) -> bool:
     tail = ""
     if len(sel) > 1 and len(units) == 1:
         tail = f"\n<b>Итого: {_fmt_qty(total_sum, sel[0]['unit'])}</b>"
-    rich = f"<b>{head}</b><ul>" + "".join(_item_li(r) for r in sel) + "</ul>" + (f"<p>{tail.strip()}</p>" if tail else "")
+
+    def _stock_li(row):
+        # Имя + количество + явная ссылка на карточку (чтобы «дай ссылку» было сразу выполнено).
+        name = html_escape(_typo(row["name"]))
+        projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
+        proj = f"  ·  🔧{NBSP}{html_escape(projects_csv)}" if projects_csv else ""
+        url = item_web_url(row["id"])
+        return (f'<li>{name} — {_item_qty_text(row)}{proj}  ·  '
+                f'<a href="{html_escape(url)}">📖 карточка</a></li>')
+
+    rich = f"<b>{head}</b><ul>" + "".join(_stock_li(r) for r in sel) + "</ul>" + (f"<p>{tail.strip()}</p>" if tail else "")
     if send_rich(chat_id, rich) is not None:
         return True
-    quotes = [f"<blockquote>{_item_li(r)[4:-5]}</blockquote>" for r in sel]
-    send(chat_id, head + "\n" + "\n".join(quotes) + tail, parse_mode="HTML")
+    # Откат: текст + явные ссылки.
+    lines = [head]
+    for r in sel:
+        lines.append(f"• {_typo(r['name'])} — {_item_qty_text(r)}\n  📖 {item_web_url(r['id'])}")
+    send(chat_id, "\n".join(lines) + tail.replace("<b>", "").replace("</b>", ""))
     return True
 
 
