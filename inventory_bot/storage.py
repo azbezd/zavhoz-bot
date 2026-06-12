@@ -376,6 +376,43 @@ def item_apply_enrichment(conn, item_id: str, enr: dict) -> None:
     conn.commit()
 
 
+def item_has_only_screenshot(conn, item_id: str) -> bool:
+    """У позиции нет фото, либо только пользовательский скриншот (telegram-*)."""
+    rows = conn.execute("SELECT path FROM item_photos WHERE item_id = ?", (item_id,)).fetchall()
+    if not rows:
+        return True
+    return all("telegram-" in r["path"] for r in rows)
+
+
+def item_fetch_photo(conn, item_id: str, image_url: str, repo_dir: str, replace_screenshot: bool = True) -> bool:
+    """Скачать нормальное фото товара в repo/photos и привязать. Возвращает True при успехе.
+    Если у позиции только скриншот-опознание — заменяем его."""
+    import os, hashlib, urllib.request as _u
+    if not image_url.startswith("http"):
+        return False
+    photos_dir = os.path.join(repo_dir, "photos")
+    os.makedirs(photos_dir, exist_ok=True)
+    ext = ".png" if image_url.lower().split("?")[0].endswith(".png") else ".jpg"
+    fname = f"{item_id}-web-{hashlib.md5(image_url.encode()).hexdigest()[:8]}{ext}"
+    abs_path = os.path.join(photos_dir, fname)
+    try:
+        req = _u.Request(image_url, headers={"User-Agent": "Mozilla/5.0"})
+        with _u.urlopen(req, timeout=30) as resp:
+            ctype = resp.headers.get("Content-Type", "")
+            data = resp.read()
+        if "image" not in ctype or len(data) < 2000:
+            return False
+        with open(abs_path, "wb") as fh:
+            fh.write(data)
+    except Exception:
+        return False
+    if replace_screenshot and item_has_only_screenshot(conn, item_id):
+        conn.execute("DELETE FROM item_photos WHERE item_id = ?", (item_id,))
+    conn.execute("INSERT OR IGNORE INTO item_photos (item_id, path) VALUES (?, ?)", (item_id, f"photos/{fname}"))
+    conn.commit()
+    return True
+
+
 def item_add_manual(conn, item_id: str, url: str) -> None:
     conn.execute("INSERT OR IGNORE INTO item_manuals (item_id, url_or_path) VALUES (?, ?)", (item_id, url.strip()))
     conn.execute("UPDATE items SET updated_at = ? WHERE id = ?", (utc_now(), item_id))

@@ -61,6 +61,7 @@ try:
         inv_skipped,
         inv_start,
         item_add_photo,
+        item_fetch_photo,
         item_set_photo,
         find_item_by_words,
         layout_clear,
@@ -137,6 +138,7 @@ except ImportError:
         inv_skipped,
         inv_start,
         item_add_photo,
+        item_fetch_photo,
         item_set_photo,
         find_item_by_words,
         layout_clear,
@@ -881,6 +883,12 @@ def _enrich_new_items(conn, chat_id: int, apply_result: dict) -> None:
             print(f"enrich error {iid}: {exc}", flush=True)
             continue
         item_apply_enrichment(conn, iid, enr)
+        # Нормальное фото товара из открытых источников (заменяет скриншот-опознание).
+        if enr.get("image_url"):
+            try:
+                item_fetch_photo(conn, iid, enr["image_url"], os.environ.get("INVENTORY_REPO_DIR", os.getcwd()))
+            except Exception as exc:
+                print(f"enrich photo error {iid}: {exc}", flush=True)
         bits = []
         if enr.get("summary"):
             bits.append(enr["summary"])
@@ -2334,7 +2342,9 @@ def handle_message(conn, message: dict) -> None:
                 remember_chat(conn, user_id, "assistant", q)
                 send(chat_id, q)
                 return
-            proposal_id = save_proposal(conn, user_id, chat_id, text, photo_paths, proposal)
+            # Присланное фото — для ОПОЗНАНИЯ, а не как фото карточки (скриншот заказа
+            # не годится для каталога). Нормальное фото товара найдёт обогащение.
+            proposal_id = save_proposal(conn, user_id, chat_id, text, [], proposal)
             remember_chat(conn, user_id, "assistant", format_proposal(conn, proposal_id, proposal))
             _send_proposal(conn, chat_id, proposal_id, proposal)
         except Exception as exc:
