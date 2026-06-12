@@ -348,15 +348,13 @@ def _render_stock_list(conn, chat_id: int, rows) -> None:
         groups.setdefault(row["category"] or "other", []).append(row)
     order = [c for c in CATEGORY_LABELS if c in groups] + [c for c in groups if c not in CATEGORY_LABELS]
 
-    # Маленькие группы раскрыты сразу, большие — свёрнуты (тап разворачивает).
-    OPEN_LIMIT = 4
-    parts = [f"<h3>📋 Склад · {len(rows)} позиций · {len(order)} групп</h3>"]
+    # Все группы свёрнуты — видны только заголовки, тап разворачивает нужную.
+    parts = [f"<b>📋 Склад · {len(rows)} позиций · {len(order)} групп</b>"]
     for cat in order:
         items = groups[cat]
         label = CATEGORY_LABELS.get(cat, html_escape(cat))
         body = "<ul>" + "".join(_item_li(r) for r in items) + "</ul>"
-        open_attr = " open" if len(items) <= OPEN_LIMIT else ""
-        parts.append(f"<details{open_attr}><summary>{label} · {len(items)}</summary>{body}</details>")
+        parts.append(f"<details><summary>{label} · {len(items)}</summary>{body}</details>")
     if send_rich(chat_id, "".join(parts)) is not None:
         return
 
@@ -940,7 +938,7 @@ def _project_composition_rich(items) -> str:
     out = []
     for cat in order:
         label = CATEGORY_LABELS.get(cat, html_escape(cat or "—"))
-        out.append(f"<h6>{label}</h6><ul>")
+        out.append(f"<b>{label}</b><ul>")
         out.append("".join(
             f"<li>{html_escape(_typo(it['name']))} — {_fmt_qty(it['qty'], it['unit'])}</li>"
             for it in groups[cat]
@@ -954,7 +952,7 @@ def _projects_overview(conn, chat_id: int) -> None:
     if not projects:
         send(chat_id, "Проекты пока не заведены.")
         return
-    parts = [f"<h3>🛠 Проекты · {len(projects)}</h3>"]
+    parts = [f"<b>🛠 Проекты · {len(projects)}</b>"]
     btn_row, rows = [], []
     for proj in projects:
         items = project_items(conn, proj["id"])
@@ -985,7 +983,7 @@ def _project_card(conn, chat_id: int, project_id: str) -> None:
         send(chat_id, "Проект не нашёл.")
         return
     items = project_items(conn, project_id)
-    parts = [f"<h3>🛠 {html_escape(proj['name'])}</h3>"]
+    parts = [f"<b>🛠 {html_escape(proj['name'])}</b>"]
     if proj["description"]:
         parts.append(f"<p><i>{html_escape(proj['description'])}</i></p>")
     parts.append(_project_composition_rich(items))
@@ -1791,7 +1789,7 @@ def _answer_stock_question(conn, chat_id: int, text: str) -> bool:
     tail = ""
     if len(sel) > 1 and len(units) == 1:
         tail = f"\n<b>Итого: {_fmt_qty(total_sum, sel[0]['unit'])}</b>"
-    rich = f"<h4>{head}</h4><ul>" + "".join(_item_li(r) for r in sel) + "</ul>" + (f"<p>{tail.strip()}</p>" if tail else "")
+    rich = f"<b>{head}</b><ul>" + "".join(_item_li(r) for r in sel) + "</ul>" + (f"<p>{tail.strip()}</p>" if tail else "")
     if send_rich(chat_id, rich) is not None:
         return True
     quotes = [f"<blockquote>{_item_li(r)[4:-5]}</blockquote>" for r in sel]
