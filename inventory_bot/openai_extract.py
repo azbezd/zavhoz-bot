@@ -242,6 +242,8 @@ ENRICH_PROMPT = """Ты — инженер-документалист. Сост�
  "image_url": "прямая ссылка на ЧЁТКОЕ фото именно этого товара/детали (jpg/png) из надёжного
    источника — страница производителя, datasheet, крупный магазин компонентов. Пустая строка,
    если уверенного фото нет. НЕ давай ссылку на скриншот заказа или нерелевантную картинку.",
+ "amperkot_url": "ссылка на страницу ЭТОГО товара на amperkot.ru, если он там продаётся
+   (формат https://amperkot.ru/products/<slug>/<id>.html). Иначе пустая строка.",
  "reasoning": "1-2 предложения: какую деталь опознал, где искал, почему выбрал эти источники"}
 """
 
@@ -293,12 +295,16 @@ def enrich_item(name: str) -> dict:
     image_url = str(data.get("image_url") or "").strip()
     if not image_url.startswith("http") or any(b in image_url.lower() for b in BAD):
         image_url = ""
+    amperkot_url = str(data.get("amperkot_url") or "").strip()
+    if "amperkot.ru/products/" not in amperkot_url:
+        amperkot_url = ""
     return {
         "summary": str(data.get("summary") or "").strip(),
         "description": str(data.get("description") or "").strip(),
         "specs": {str(k): str(v) for k, v in specs.items() if v},
         "docs": docs[:3],
         "image_url": image_url,
+        "amperkot_url": amperkot_url,
         "reasoning": str(data.get("reasoning") or "").strip(),
     }
 

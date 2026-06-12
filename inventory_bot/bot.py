@@ -883,10 +883,21 @@ def _enrich_new_items(conn, chat_id: int, apply_result: dict) -> None:
             print(f"enrich error {iid}: {exc}", flush=True)
             continue
         item_apply_enrichment(conn, iid, enr)
-        # Нормальное фото товара из открытых источников (заменяет скриншот-опознание).
-        if enr.get("image_url"):
+        # Фото: сначала пытаемся со страницы amperkot (надёжный источник, как покупал
+        # пользователь), затем — то, что нашла модель.
+        repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
+        got_photo = False
+        if enr.get("amperkot_url"):
             try:
-                item_fetch_photo(conn, iid, enr["image_url"], os.environ.get("INVENTORY_REPO_DIR", os.getcwd()))
+                d = scrape_amperkot(enr["amperkot_url"])
+                item_set_source(conn, iid, enr["amperkot_url"], "amperkot.ru")
+                if d.get("image"):
+                    got_photo = item_fetch_photo(conn, iid, d["image"], repo_dir)
+            except Exception as exc:
+                print(f"amperkot enrich photo {iid}: {exc}", flush=True)
+        if not got_photo and enr.get("image_url"):
+            try:
+                item_fetch_photo(conn, iid, enr["image_url"], repo_dir)
             except Exception as exc:
                 print(f"enrich photo error {iid}: {exc}", flush=True)
         bits = []
