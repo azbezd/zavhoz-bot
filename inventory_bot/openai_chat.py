@@ -4,6 +4,9 @@ import urllib.error
 import urllib.request
 
 
+SITE_BASE = os.environ.get("ZAVHOZ_SITE_BASE", "https://azbezd.github.io/zavhoz-web")
+
+
 SYSTEM_PROMPT = """Ты Завхоз — умный Telegram-помощник для личного склада электроники.
 Говори по-русски, живо, коротко и по делу. Обращайся на "ты".
 Твоя задача: помогать вести инвентарь, понимать фото и текст, задавать уточняющие вопросы,
@@ -16,8 +19,11 @@ SYSTEM_PROMPT = """Ты Завхоз — умный Telegram-помощник д
 - Эмодзи можно умеренно (для акцентов, не каждый абзац).
 - Если нужен список — короткие пункты на отдельных строках, без буллетов.
 - На вопросы о наличии («сколько резисторов», «какие датчики есть») отвечай СПИСКОМ
-  подходящих позиций, по строке на позицию: «Название — N шт», и в конце строки ссылка
-  на магазин из снапшота, если есть (голым URL, Telegram сам подсветит). Не отвечай голой суммой.
+  подходящих позиций, по строке на позицию: «Название — N шт», и в конце строки ОБЯЗАТЕЛЬНО
+  ссылка на карточку из снапшота (последнее поле строки, голым URL — это наша витрина). Не отвечай голой суммой.
+- Когда называешь конкретную позицию склада (в т.ч. на просьбу «дай ссылку») — всегда давай
+  ссылку на её карточку из снапшота (последнее поле строки). НИКОГДА не давай ссылок на магазины
+  (amperkot, ozon, wildberries, aliexpress) и не выдумывай URL — только карточка из снапшота.
 - Полный список склада не пытайся выдать сам, направь пользователя на /list.
   /list рендерится с правильной разметкой и группами; ты вручную лучше не сделаешь.
 
@@ -40,9 +46,7 @@ SYSTEM_PROMPT = """Ты Завхоз — умный Telegram-помощник д
 def inventory_snapshot(conn, limit: int = 120) -> str:
     rows = conn.execute(
         """
-        SELECT i.name, i.category, i.status, i.available_qty, i.total_qty, i.unit, i.location,
-               (SELECT s.url FROM item_sources s WHERE s.item_id = i.id
-                ORDER BY CASE s.kind WHEN 'purchase' THEN 0 ELSE 1 END, s.rowid LIMIT 1) AS url
+        SELECT i.id, i.name, i.category, i.status, i.available_qty, i.total_qty, i.unit
         FROM items i
         WHERE i.status != 'retired'
         ORDER BY i.category, i.name
@@ -52,11 +56,14 @@ def inventory_snapshot(conn, limit: int = 120) -> str:
     ).fetchall()
     if not rows:
         return "Склад пуст."
+    # Последнее поле — ссылка на НАШУ карточку в вебе (не на магазин): она не протухает,
+    # внутри неё уже есть фото/описание/официальная документация.
     lines = []
     for row in rows:
+        card = f"{SITE_BASE}/item/{row['id']}.html"
         lines.append(
             f"{row['name']} | {row['category']} | {row['status']} | "
-            f"{row['available_qty']:g}/{row['total_qty']:g} {row['unit']} | {row['url'] or '-'}"
+            f"{row['available_qty']:g}/{row['total_qty']:g} {row['unit']} | {card}"
         )
     return "\n".join(lines)
 
