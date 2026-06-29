@@ -800,7 +800,7 @@ def inv_mark_lost(conn, item_id: str) -> None:
     conn.commit()
 
 
-def list_items_with_sources(conn, limit: int = 200):
+def list_items_with_sources(conn, limit: int = 500):
     """Items with the first source URL (preferring kind='purchase')."""
     return conn.execute(
         """

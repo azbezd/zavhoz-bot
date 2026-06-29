@@ -1824,6 +1824,25 @@ def _looks_like_stock_question(text: str) -> bool:
     return stripped.endswith(("есть", "имеется", "в наличии", "остался", "осталось", "остались"))
 
 
+def _is_bare_lookup(text: str) -> bool:
+    """Короткий запрос-«одно-два слова» («Провода», «дисплеи», «TCRT») = поиск по складу.
+    Используется ТОЛЬКО при финальной маршрутизации (не в защите черновика): если ничего
+    не нашлось — _answer_stock_question вернёт False и сообщение уйдёт в чат как обычно."""
+    t = (text or "").strip()
+    if not t or t.startswith("/"):
+        return False
+    words = t.split()
+    if len(words) > 3:
+        return False
+    low = t.lower().rstrip("?!.…")
+    STOP = {"плохо", "нет", "да", "не так", "не то", "неверно", "неправильно", "отмена",
+            "отмени", "не надо", "выкинь", "удали", "ок", "окей", "спасибо", "привет",
+            "здравствуй", "хорошо", "верно", "ага", "угу", "нормально", "супер", "класс"}
+    if low in STOP:
+        return False
+    return any(len(w) >= 3 and any(c.isalpha() for c in w) for w in words)
+
+
 def _answer_stock_question(conn, chat_id: int, text: str) -> bool:
     """Вопрос о наличии: AI выбирает строки склада, бот рендерит список с количествами.
     Возвращает True, если ответ отправлен."""
@@ -2392,7 +2411,7 @@ def handle_message(conn, message: dict) -> None:
             send(chat_id, reply)
         print(f"step: inventory draft sent", flush=True)
     else:
-        if text and _looks_like_stock_question(text):
+        if text and (_looks_like_stock_question(text) or _is_bare_lookup(text)):
             print("step: route=stock-question", flush=True)
             send_chat_action(chat_id, "typing")
             if _answer_stock_question(conn, chat_id, text):

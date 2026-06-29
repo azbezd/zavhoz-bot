@@ -43,7 +43,7 @@ SYSTEM_PROMPT = """Ты Завхоз — умный Telegram-помощник д
 """
 
 
-def inventory_snapshot(conn, limit: int = 120) -> str:
+def inventory_snapshot(conn, limit: int = 500) -> str:
     rows = conn.execute(
         """
         SELECT i.id, i.name, i.category, i.status, i.available_qty, i.total_qty, i.unit
