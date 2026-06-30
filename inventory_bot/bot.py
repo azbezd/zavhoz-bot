@@ -263,20 +263,20 @@ def html_escape(text: str) -> str:
 
 
 CATEGORY_LABELS = {
-    "computer": "🖥 Компьютеры и платформы",
-    "microcontroller": "🧠 Микроконтроллеры",
-    "module": "📦 Модули",
-    "sensor": "📡 Сенсоры",
-    "emitter": "💡 Излучатели (LED, дисплеи)",
-    "semiconductor": "⚡️ Полупроводники",
-    "passive": "🔘 Пассивные (резисторы, конденсаторы)",
-    "connector": "🔌 Разъёмы",
-    "wire": "🪢 Провода",
-    "proto": "🟫 Платы прототипирования",
-    "network": "🌐 Сетевое оборудование",
-    "power": "🔋 Питание",
-    "mechanical": "🔩 Механика",
-    "tool": "🛠 Инструменты",
+    "computer": "Компьютеры и платформы",
+    "microcontroller": "Микроконтроллеры",
+    "module": "Модули",
+    "sensor": "Сенсоры",
+    "emitter": "Излучатели (LED, дисплеи)",
+    "semiconductor": "Полупроводники",
+    "passive": "Пассивные (резисторы, конденсаторы)",
+    "connector": "Разъёмы",
+    "wire": "Провода",
+    "proto": "Платы прототипирования",
+    "network": "Сетевое оборудование",
+    "power": "Питание",
+    "mechanical": "Механика",
+    "tool": "Инструменты",
 }
 
 
@@ -334,12 +334,12 @@ def _item_qty_text(row) -> str:
 
 
 def _item_li(row) -> str:
+    # Вся строка позиции — одна ссылка на нашу карточку (не протухает; магазин — внутри неё).
     name = html_escape(_typo(row["name"]))
-    # Имя ведёт на нашу страницу-карточку (не протухает); ссылка на магазин — внутри неё.
-    name_part = f'<a href="{html_escape(item_web_url(row["id"]))}">{name}</a>'
     projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
-    proj_part = f"  ·  🔧{NBSP}{html_escape(projects_csv)}" if projects_csv else ""
-    return f"<li>{name_part} — {_item_qty_text(row)}{proj_part}</li>"
+    proj_part = f"  ·  {html_escape(projects_csv)}" if projects_csv else ""
+    inner = f"{name} — {_item_qty_text(row)}{proj_part}"
+    return f'<li><a href="{html_escape(item_web_url(row["id"]))}">{inner}</a></li>'
 
 
 def _render_stock_list(conn, chat_id: int, rows) -> None:
@@ -351,7 +351,7 @@ def _render_stock_list(conn, chat_id: int, rows) -> None:
     order = [c for c in CATEGORY_LABELS if c in groups] + [c for c in groups if c not in CATEGORY_LABELS]
 
     # Все группы свёрнуты — видны только заголовки, тап разворачивает нужную.
-    parts = [f"<b>📋 Склад · {len(rows)} позиций · {len(order)} групп</b>"]
+    parts = [f"<b>Склад · {len(rows)} позиций · {len(order)} групп</b>"]
     for cat in order:
         items = groups[cat]
         label = CATEGORY_LABELS.get(cat, html_escape(cat))
@@ -361,7 +361,7 @@ def _render_stock_list(conn, chat_id: int, rows) -> None:
         return
 
     # Откат: старый вид — каждая группа отдельным сообщением, позиции цитатами.
-    send(chat_id, f"📋 Склад: {len(rows)} позиций, {len(order)} групп.")
+    send(chat_id, f"Склад: {len(rows)} позиций, {len(order)} групп.")
     for cat in order:
         items = groups[cat]
         label = CATEGORY_LABELS.get(cat, html_escape(cat))
@@ -537,7 +537,7 @@ def format_proposal(conn, proposal_id: int, proposal: dict) -> str:
         unit = op.get("unit") or (cur["unit"] if cur else "шт")
         qty = op.get("qty") or 0
         if kind == "add_item":
-            line = f"{idx}. ➕ Добавить: {op.get('name', '?')} — {qty:g} {unit}"
+            line = f"{idx}. Добавить: {op.get('name', '?')} — {qty:g} {unit}"
             if op.get("price_rub"):
                 line += f", {op['price_rub']:g} ₽"
         elif kind == "update_item":
@@ -549,19 +549,19 @@ def format_proposal(conn, proposal_id: int, proposal: dict) -> str:
                 changes.append("описание")
             if op.get("notes"):
                 changes.append(f"заметка: {op['notes']}")
-            line = f"{idx}. ✏️ Изменить «{tgt}»: " + (", ".join(changes) or "—")
+            line = f"{idx}. Изменить «{tgt}»: " + (", ".join(changes) or "—")
         elif kind == "adjust_qty":
             if cur:
-                line = f"{idx}. 🔢 {cur['name']}: было {cur['total_qty']:g} → станет {cur['total_qty'] + qty:g} {unit}"
+                line = f"{idx}. {cur['name']}: было {cur['total_qty']:g} → станет {cur['total_qty'] + qty:g} {unit}"
             else:
-                line = f"{idx}. 🔢 +{qty:g} {unit} (позиция не опознана!)"
+                line = f"{idx}. +{qty:g} {unit} (позиция не опознана!)"
         elif kind == "mark_used":
             tgt = cur["name"] if cur else (op.get("item_id") or "?")
-            line = f"{idx}. 🔧 {tgt} → в проект {op.get('project_id', '?')} ({qty:g} {unit})"
+            line = f"{idx}. {tgt} → в проект {op.get('project_id', '?')} ({qty:g} {unit})"
         elif kind == "add_photo":
-            line = f"{idx}. 📷 фото к {cur['name'] if cur else op.get('item_id', '?')}"
+            line = f"{idx}. фото к {cur['name'] if cur else op.get('item_id', '?')}"
         elif kind == "ask_user":
-            line = f"{idx}. ❓ {op.get('question', 'уточни')}"
+            line = f"{idx}. {op.get('question', 'уточни')}"
         else:
             line = f"{idx}. {kind} | {op.get('name') or op.get('item_id') or '-'}"
         lines.append(line)
@@ -574,8 +574,8 @@ def format_proposal(conn, proposal_id: int, proposal: dict) -> str:
 
 def _send_proposal(conn, chat_id: int, proposal_id: int, proposal: dict) -> None:
     kb = {"inline_keyboard": [[
-        {"text": "✅ Применить", "callback_data": f"prop:yes:{proposal_id}"},
-        {"text": "🗑 Отменить", "callback_data": f"prop:no:{proposal_id}"},
+        {"text": "Применить", "callback_data": f"prop:yes:{proposal_id}"},
+        {"text": "Отменить", "callback_data": f"prop:no:{proposal_id}"},
     ]]}
     msg_id = send_with_keyboard(chat_id, html_escape(format_proposal(conn, proposal_id, proposal)), kb)
     if msg_id:
@@ -641,11 +641,11 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
             "Пиши обычным языком: «купил 10 резисторов 220 Ом», «это ушло в FreeNetBox», "
             "«что у меня есть для ESP32?». Изменения склада сначала приходят черновиком "
             "с кнопками Применить/Отменить; ответом на черновик можно его поправить.\n\n"
-            "📋 /list — склад по группам (нули и списанное скрыты, проектное — с пометкой)\n"
-            "🔍 /inv — инвентаризация: всё управление кнопками (пропустить, к пропущенным, завершить)\n"
-            "✏️ /edit — точечно изменить позицию из списка\n"
-            "🛠 /projects — проекты\n\n"
-            "📖 Витрина склада в вебе: " + SITE_BASE + "\n"
+            "/list — склад по группам (нули и списанное скрыты, проектное — с пометкой)\n"
+            "/inv — инвентаризация: всё управление кнопками (пропустить, к пропущенным, завершить)\n"
+            "/edit — точечно изменить позицию из списка\n"
+            "/projects — проекты\n\n"
+            "Витрина склада в вебе: " + SITE_BASE + "\n"
             "Экспорт и сайт обновляются автоматически после изменений."
         )
         send(chat_id, msg)
@@ -682,7 +682,7 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
         name = " ".join(parts[1:]).strip()
         pid, created = project_create(conn, name)
         _edit_export(conn, f"create project {pid}")
-        send(chat_id, (f"🆕 Проект «{name}» создан." if created else f"Проект «{name}» уже есть."))
+        send(chat_id, (f"Проект «{name}» создан." if created else f"Проект «{name}» уже есть."))
         _project_card(conn, chat_id, pid)
     elif cmd == "/show" and len(parts) == 2:
         row = get_proposal(conn, int(parts[1]))
@@ -715,15 +715,15 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
             done, total_count = inv_progress(conn, user_id)
             kb = {"inline_keyboard": [[
                 {"text": f"▶️ Продолжить ({total_count - done} осталось)", "callback_data": "inv:resume:_"},
-                {"text": "🔄 Начать заново", "callback_data": "inv:restart:_"},
+                {"text": "Начать заново", "callback_data": "inv:restart:_"},
             ]]}
             send_with_keyboard(chat_id, f"Инвентаризация уже идёт: проверено {done} из {total_count}.", kb)
         else:
             new_count = inv_new_count(conn)
             if new_count:
                 kb = {"inline_keyboard": [[
-                    {"text": f"🆕 Только новые ({new_count})", "callback_data": "inv:scope:new"},
-                    {"text": "🔍 Всё подряд", "callback_data": "inv:scope:all"},
+                    {"text": f"Только новые ({new_count})", "callback_data": "inv:scope:new"},
+                    {"text": "Всё подряд", "callback_data": "inv:scope:all"},
                 ]]}
                 send_with_keyboard(chat_id, "Что проверяем?", kb)
             else:
@@ -851,17 +851,17 @@ def _unit_ru(unit: str) -> str:
 def _inv_keyboard(item_id: str, skipped_count: int = 0, pass_no: int = 1) -> dict:
     rows = [
         [
-            {"text": "✅ Есть", "callback_data": f"inv:ok:{item_id}"},
-            {"text": "✏️ Изм.", "callback_data": f"inv:edit:{item_id}"},
+            {"text": "Есть", "callback_data": f"inv:ok:{item_id}"},
+            {"text": "Изм.", "callback_data": f"inv:edit:{item_id}"},
         ],
         [
-            {"text": "🔧 В проекте", "callback_data": f"inv:proj:{item_id}"},
+            {"text": "В проекте", "callback_data": f"inv:proj:{item_id}"},
             {"text": "⏭ Пропустить", "callback_data": f"inv:skip:{item_id}"},
         ],
     ]
     last_row = [{"text": "⏹ Завершить", "callback_data": "inv:stop:_"}]
     if pass_no == 1 and skipped_count:
-        last_row.append({"text": f"↩️ Пропущенные ({skipped_count})", "callback_data": "inv:retskip:_"})
+        last_row.append({"text": f"Пропущенные ({skipped_count})", "callback_data": "inv:retskip:_"})
     rows.append(last_row)
     return {"inline_keyboard": rows}
 
@@ -906,9 +906,9 @@ def _enrich_new_items(conn, chat_id: int, apply_result: dict) -> None:
         if enr.get("specs"):
             bits.append("Характеристики: " + ", ".join(f"{k}: {v}" for k, v in list(enr["specs"].items())[:6]))
         for d in (enr.get("docs") or [])[:3]:
-            bits.append(f"📄 {d.get('title', 'Документация')}: {d['url']}")
-        msg = f"🧠 Обогатил «{item['name']}» из открытых источников.\n" + ("\n".join(bits) if bits else "Доп. данных не нашёл.")
-        msg += f"\n📖 {item_web_url(iid)}"
+            bits.append(f"{d.get('title', 'Документация')}: {d['url']}")
+        msg = f"Обогатил «{item['name']}» из открытых источников.\n" + ("\n".join(bits) if bits else "Доп. данных не нашёл.")
+        msg += f"\n{item_web_url(iid)}"
         send(chat_id, msg, disable_web_page_preview=True)
 
 
@@ -926,18 +926,18 @@ def _inv_show_edit_menu(conn, chat_id: int, item) -> None:
     iid = item["id"]
     kb = {"inline_keyboard": [
         [
-            {"text": "🔢 Количество", "callback_data": f"inv:qty:{iid}"},
-            {"text": "🏷 Категория", "callback_data": f"inv:cat:{iid}"},
+            {"text": "Количество", "callback_data": f"inv:qty:{iid}"},
+            {"text": "Категория", "callback_data": f"inv:cat:{iid}"},
         ],
         [
-            {"text": "✏️ Название", "callback_data": f"inv:name:{iid}"},
-            {"text": "💰 Цена", "callback_data": f"inv:price:{iid}"},
+            {"text": "Название", "callback_data": f"inv:name:{iid}"},
+            {"text": "Цена", "callback_data": f"inv:price:{iid}"},
         ],
         [
-            {"text": "🔗 Источник", "callback_data": f"inv:source:{iid}"},
-            {"text": "🗑 Списать", "callback_data": f"inv:retire:{iid}"},
+            {"text": "Источник", "callback_data": f"inv:source:{iid}"},
+            {"text": "Списать", "callback_data": f"inv:retire:{iid}"},
         ],
-        [{"text": "↩️ Отмена", "callback_data": "inv:pcancel:_"}],
+        [{"text": "Отмена", "callback_data": "inv:pcancel:_"}],
     ]}
     send_with_keyboard(chat_id, f"Что меняем у «{html_escape(item['name'])}»?", kb)
 
@@ -952,8 +952,8 @@ def _inv_show_category_picker(conn, chat_id: int, item) -> None:
             row = []
     if row:
         rows.append(row)
-    rows.append([{"text": "✍️ Своя — напишу текстом", "callback_data": f"inv:cnew:{item['id']}"}])
-    rows.append([{"text": "↩️ Отмена", "callback_data": "inv:pcancel:_"}])
+    rows.append([{"text": "Своя — напишу текстом", "callback_data": f"inv:cnew:{item['id']}"}])
+    rows.append([{"text": "Отмена", "callback_data": "inv:pcancel:_"}])
     cur = CATEGORY_LABELS.get(item["category"], item["category"] or "—")
     send_with_keyboard(chat_id, f"Категория для «{html_escape(item['name'])}» (сейчас: {cur}):",
                        {"inline_keyboard": rows})
@@ -968,7 +968,7 @@ def _inv_show_project_picker(conn, chat_id: int, item) -> None:
             row = []
     if row:
         rows.append(row)
-    rows.append([{"text": "↩️ Отмена", "callback_data": "inv:pcancel:_"}])
+    rows.append([{"text": "Отмена", "callback_data": "inv:pcancel:_"}])
     send_with_keyboard(chat_id, f"Где используется «{html_escape(item['name'])}»?", {"inline_keyboard": rows})
 
 
@@ -997,7 +997,7 @@ def _projects_overview(conn, chat_id: int) -> None:
     if not projects:
         send(chat_id, "Проекты пока не заведены.")
         return
-    parts = [f"<b>🛠 Проекты · {len(projects)}</b>"]
+    parts = [f"<b>Проекты · {len(projects)}</b>"]
     btn_row, rows = [], []
     for proj in projects:
         items = project_items(conn, proj["id"])
@@ -1012,12 +1012,12 @@ def _projects_overview(conn, chat_id: int) -> None:
             btn_row = []
     if btn_row:
         rows.append(btn_row)
-    rows.append([{"text": "➕ Новый проект", "callback_data": "prj:new:_"}])
+    rows.append([{"text": "Новый проект", "callback_data": "prj:new:_"}])
     parts.append("<p>Кнопкой ниже можно открыть проект и поправить его, либо создать новый.</p>")
     if send_rich(chat_id, "".join(parts), {"inline_keyboard": rows}) is not None:
         return
     # Откат на простой текст.
-    flat = "<b>🛠 Проекты</b>\n" + "\n".join(
+    flat = "<b>Проекты</b>\n" + "\n".join(
         f"<b>{html_escape(p['name'])}</b> — {len(project_items(conn, p['id']))} деталей" for p in projects)
     send_with_keyboard(chat_id, flat, {"inline_keyboard": rows})
 
@@ -1028,7 +1028,7 @@ def _project_card(conn, chat_id: int, project_id: str) -> None:
         send(chat_id, "Проект не нашёл.")
         return
     items = project_items(conn, project_id)
-    parts = [f"<b>🛠 {html_escape(proj['name'])}</b>"]
+    parts = [f"<b>{html_escape(proj['name'])}</b>"]
     if proj["description"]:
         parts.append(f"<p><i>{html_escape(proj['description'])}</i></p>")
     parts.append(_project_composition_rich(items))
@@ -1036,14 +1036,14 @@ def _project_card(conn, chat_id: int, project_id: str) -> None:
                  "«переименуй в Имя» — переименует; «удали проект» — удалит.</p>")
     kb_rows = []
     if items:
-        kb_rows.append([{"text": "➖ Вынуть деталь", "callback_data": f"prj:out:{project_id}"}])
+        kb_rows.append([{"text": "Вынуть деталь", "callback_data": f"prj:out:{project_id}"}])
     kb_rows.append([
-        {"text": "🗑 Удалить проект", "callback_data": f"prj:del:{project_id}"},
-        {"text": "↩️ Все проекты", "callback_data": "prj:list:_"},
+        {"text": "Удалить проект", "callback_data": f"prj:del:{project_id}"},
+        {"text": "Все проекты", "callback_data": "prj:list:_"},
     ])
     msg_id = send_rich(chat_id, "".join(parts), {"inline_keyboard": kb_rows})
     if msg_id is None:
-        flat = [f"<b>🛠 {html_escape(proj['name'])}</b>"]
+        flat = [f"<b>{html_escape(proj['name'])}</b>"]
         if proj["description"]:
             flat.append(f"<i>{html_escape(proj['description'])}</i>")
         for it in items:
@@ -1062,7 +1062,7 @@ def _project_out_menu(conn, chat_id: int, project_id: str) -> None:
     rows = []
     for it in items[:30]:
         rows.append([{"text": f"{it['name'][:40]} ×{it['qty']:g}", "callback_data": f"prj:rm:{project_id}:{it['id']}"}])
-    rows.append([{"text": "↩️ Отмена", "callback_data": f"prj:show:{project_id}"}])
+    rows.append([{"text": "Отмена", "callback_data": f"prj:show:{project_id}"}])
     send_with_keyboard(chat_id, f"Что вынуть из «{html_escape(proj['name'])}»? Деталь станет свободной на складе.",
                        {"inline_keyboard": rows})
 
@@ -1077,7 +1077,7 @@ def _pick_show_categories(conn, chat_id: int) -> None:
             row = []
     if row:
         rows.append(row)
-    send_with_keyboard(chat_id, "✏️ Что меняем? Выбери группу:", {"inline_keyboard": rows})
+    send_with_keyboard(chat_id, "Что меняем? Выбери группу:", {"inline_keyboard": rows})
 
 
 def _pick_show_items(conn, chat_id: int, category: str, offset: int) -> None:
@@ -1094,7 +1094,7 @@ def _pick_show_items(conn, chat_id: int, category: str, offset: int) -> None:
         nav.append({"text": "◂ Назад", "callback_data": f"pick:cat:{category}:{max(0, offset - 8)}"})
     if has_more:
         nav.append({"text": "Ещё ▸", "callback_data": f"pick:cat:{category}:{offset + 8}"})
-    nav.append({"text": "↩️ Группы", "callback_data": "pick:cats:_"})
+    nav.append({"text": "Группы", "callback_data": "pick:cats:_"})
     rows.append(nav)
     label = CATEGORY_LABELS.get(category, category or "—")
     send_with_keyboard(chat_id, f"{label} — выбери позицию:", {"inline_keyboard": rows})
@@ -1137,26 +1137,26 @@ def _inv_show_item(conn, chat_id: int, user_id: int, item) -> None:
     src_title, src_url = item_first_source(conn, item["id"])
     qty_part = f"{qty:g}{NBSP}{unit}" if qty == total else f"{qty:g}/{total:g}{NBSP}{unit}"
     if picking:
-        progress = "✏️ точечное изменение"
+        progress = "точечное изменение"
     else:
-        progress = f"📋 {done + 1}{NBSP}из{NBSP}{total_count}"
+        progress = f"{done + 1}{NBSP}из{NBSP}{total_count}"
         if pass_no >= 2:
-            progress += "  ·  ↩️ второй круг"
+            progress += "  ·  второй круг"
     lines = [
         f"<i>{progress}</i>",
         f"<b>{name}</b>",
         "",
-        f"🏷 {cat}",
-        f"🔢 По базе: <b>{qty_part}</b>",
+        f"{cat}",
+        f"По базе: <b>{qty_part}</b>",
     ]
     proj_names = item_projects(conn, item["id"])
     if proj_names:
-        lines.append(f"🔧 В проекте: {html_escape(', '.join(proj_names))}")
+        lines.append(f"В проекте: {html_escape(', '.join(proj_names))}")
     if price:
-        lines.append(f"💰 {price:g}{NBSP}₽")
+        lines.append(f"{price:g}{NBSP}₽")
     if src_url:
-        lines.append(f'🔗 <a href="{html_escape(src_url)}">{html_escape(src_title or "источник")}</a>')
-    lines.append(f'📖 <a href="{html_escape(item_web_url(item["id"]))}">карточка в вебе</a>')
+        lines.append(f'<a href="{html_escape(src_url)}">{html_escape(src_title or "источник")}</a>')
+    lines.append(f'<a href="{html_escape(item_web_url(item["id"]))}">карточка в вебе</a>')
     caption = "\n".join(lines)
     photo = item_first_photo(conn, item["id"])
     kb = _inv_keyboard(item["id"], skipped_count=len(skipped), pass_no=pass_no)
@@ -1234,25 +1234,25 @@ def _inv_finish_with_summary(conn, chat_id: int, user_id: int) -> None:
 
     lines = [f"<b>Итог инвентаризации</b>  ·  проверено {done} из {total_count}"]
     if ok_count:
-        lines.append(f"✅ Подтверждено: {ok_count}")
+        lines.append(f"Подтверждено: {ok_count}")
     if in_projects:
-        lines.append("🔧 В проектах:")
+        lines.append("В проектах:")
         for e in in_projects:
             lines.append(f"  • {html_escape(e['item_name'])}")
     if splits:
-        lines.append("🔀 Разделено (часть в проект):")
+        lines.append("Разделено (часть в проект):")
         for e in splits:
             lines.append(f"  • {html_escape(e['item_name'])}")
     if uncounted:
-        lines.append(f"📦 Есть, без пересчёта: {len(uncounted)}")
+        lines.append(f"Есть, без пересчёта: {len(uncounted)}")
     if qty_changes:
-        lines.append("✏️ Изменено количество:")
+        lines.append("Изменено количество:")
         for e in qty_changes:
             old = f"{e['old_total']:g}" if e["old_total"] is not None else "?"
             new = f"{e['new_total']:g}" if e["new_total"] is not None else "?"
             lines.append(f"  • {html_escape(e['item_name'])}: {old} → {new}")
     if consumed or lost:
-        lines.append("🗑 Списано (из учёта убрано):")
+        lines.append("Списано (из учёта убрано):")
         for e in consumed + lost:
             lines.append(f"  • {html_escape(e['item_name'])}")
     if unchecked:
@@ -1266,10 +1266,10 @@ def _inv_finish_with_summary(conn, chat_id: int, user_id: int) -> None:
             export_items(repo_dir)
             maybe_git_sync(repo_dir, "inventory check via telegram /inv")
             if os.environ.get("INVENTORY_AUTO_GIT", "0") == "1":
-                synced = "\n\n💾 Изменения выгружены в GitHub."
+                synced = "\n\nИзменения выгружены в GitHub."
         except Exception as exc:
             print(f"inv export/sync error: {exc}", flush=True)
-            synced = f"\n\n⚠️ Экспорт в GitHub не прошёл: {exc}"
+            synced = f"\n\nЭкспорт в GitHub не прошёл: {exc}"
     send_html(chat_id, "\n".join(lines) + synced)
 
 
@@ -1310,8 +1310,8 @@ def handle_callback_query(conn, callback: dict) -> None:
             if proj:
                 cnt = len(project_items(conn, pid))
                 kb = {"inline_keyboard": [[
-                    {"text": "🗑 Да, удалить", "callback_data": f"prj:delyes:{pid}"},
-                    {"text": "↩️ Отмена", "callback_data": f"prj:show:{pid}"},
+                    {"text": "Да, удалить", "callback_data": f"prj:delyes:{pid}"},
+                    {"text": "Отмена", "callback_data": f"prj:show:{pid}"},
                 ]]}
                 send_with_keyboard(chat_id, f"Удалить проект «{html_escape(proj['name'])}»? "
                                             f"Его детали ({cnt}) вернутся на склад свободными.", kb)
@@ -1326,7 +1326,7 @@ def handle_callback_query(conn, callback: dict) -> None:
                     maybe_git_sync(repo_dir, f"deleted project {pid}")
                 except Exception as exc:
                     print(f"prj delete export error: {exc}", flush=True)
-                send(chat_id, f"🗑 Проект «{proj['name']}» удалён, деталей освобождено: {freed}.")
+                send(chat_id, f"Проект «{proj['name']}» удалён, деталей освобождено: {freed}.")
                 _projects_overview(conn, chat_id)
         elif prj_rest.startswith("rm:"):
             proj_id, _, iid = prj_rest[3:].partition(":")
@@ -1340,7 +1340,7 @@ def handle_callback_query(conn, callback: dict) -> None:
                     maybe_git_sync(repo_dir, f"removed {iid} from {proj_id}")
                 except Exception as exc:
                     print(f"prj export error: {exc}", flush=True)
-                send(chat_id, f"➖ «{item['name']}» вынул из {proj['name']} — снова свободная.")
+                send(chat_id, f"«{item['name']}» вынул из {proj['name']} — снова свободная.")
                 _project_card(conn, chat_id, proj_id)
             else:
                 send(chat_id, "Не нашёл позицию или проект.")
@@ -1516,7 +1516,7 @@ def handle_callback_query(conn, callback: dict) -> None:
         inv_increment_seen(conn, user_id)
         inv_log_event(conn, user_id, iid, f"{item['name']} → {proj['name']}", "project")
         answer_callback(cb_id, f"В проекте {proj['name']}")
-        send(chat_id, f"🔧 {item['name']} — в проекте {proj['name']}.")
+        send(chat_id, f"{item['name']} — в проекте {proj['name']}.")
         _inv_advance(conn, chat_id, user_id)
         return
     if action == "cset" and item_id:
@@ -1528,7 +1528,7 @@ def handle_callback_query(conn, callback: dict) -> None:
         item_set_category(conn, iid, cat_key)
         label = CATEGORY_LABELS.get(cat_key, cat_key)
         answer_callback(cb_id, "Категория обновлена")
-        send(chat_id, f"🏷 {item['name']} → {label}.")
+        send(chat_id, f"{item['name']} → {label}.")
         _inv_show_back(conn, chat_id, user_id)
         return
     if action == "cnew" and item_id:
@@ -1567,15 +1567,15 @@ def handle_callback_query(conn, callback: dict) -> None:
     if action == "retire" and item:
         answer_callback(cb_id)
         kb = {"inline_keyboard": [[
-            {"text": "🗑 Да, списать", "callback_data": f"inv:retireyes:{item_id}"},
-            {"text": "↩️ Отмена", "callback_data": "inv:pcancel:_"},
+            {"text": "Да, списать", "callback_data": f"inv:retireyes:{item_id}"},
+            {"text": "Отмена", "callback_data": "inv:pcancel:_"},
         ]]}
         send_with_keyboard(chat_id, f"Списать «{html_escape(item['name'])}»? Уйдёт из учёта.", kb)
         return
     if action == "retireyes" and item:
         item_retire(conn, item_id)
         answer_callback(cb_id, "Списано")
-        send(chat_id, f"🗑 {item['name']} — списал, из учёта убрано.")
+        send(chat_id, f"{item['name']} — списал, из учёта убрано.")
         repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
         try:
             export_items(repo_dir)
@@ -1617,8 +1617,8 @@ def handle_callback_query(conn, callback: dict) -> None:
         answer_callback(cb_id, "Жду число")
         unit = _unit_ru(item["unit"])
         kb = {"inline_keyboard": [[
-            {"text": "📦 Есть, не считал", "callback_data": f"inv:uncnt:{item_id}"},
-            {"text": "↩️ Отмена", "callback_data": "inv:qcancel:_"},
+            {"text": "Есть, не считал", "callback_data": f"inv:uncnt:{item_id}"},
+            {"text": "Отмена", "callback_data": "inv:qcancel:_"},
         ]]}
         send_with_keyboard(
             chat_id,
@@ -1682,7 +1682,7 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         inv_clear_await(conn, user_id)
         inv_increment_seen(conn, user_id)
         inv_log_event(conn, user_id, item_id, name, "ok")
-        send(chat_id, f"✅ {name} — на месте.{noted}")
+        send(chat_id, f"{name} — на месте.{noted}")
         _inv_advance(conn, chat_id, user_id)
     elif action == "lost":
         # «Нет/потерял» = списание: из учёта исчезает насовсем.
@@ -1690,14 +1690,14 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         item_retire(conn, item_id)
         inv_clear_await(conn, user_id)
         inv_increment_seen(conn, user_id)
-        send(chat_id, f"🗑 {name} — списал, из учёта убрано.{noted}")
+        send(chat_id, f"{name} — списал, из учёта убрано.{noted}")
         _inv_advance(conn, chat_id, user_id)
     elif action == "uncounted":
         inv_mark_present(conn, item_id)
         inv_clear_await(conn, user_id)
         inv_increment_seen(conn, user_id)
         inv_log_event(conn, user_id, item_id, name, "uncounted")
-        send(chat_id, f"📦 {name} — есть, без точного пересчёта.{noted}")
+        send(chat_id, f"{name} — есть, без точного пересчёта.{noted}")
         _inv_advance(conn, chat_id, user_id)
     elif action == "qty" and qty is not None:
         old_total = item["total_qty"]
@@ -1706,7 +1706,7 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         inv_increment_seen(conn, user_id)
         inv_log_event(conn, user_id, item_id, name, "qty", old_total=old_total, new_total=qty)
         unit = _unit_ru(item["unit"])
-        send(chat_id, f"✏️ {name}: записал {qty:g}{NBSP}{unit} (было {old_total:g}).{noted}")
+        send(chat_id, f"{name}: записал {qty:g}{NBSP}{unit} (было {old_total:g}).{noted}")
         _inv_advance(conn, chat_id, user_id)
     elif action == "in_project":
         proj = _resolve_project(conn, note or "")
@@ -1715,7 +1715,7 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
             inv_clear_await(conn, user_id)
             inv_increment_seen(conn, user_id)
             inv_log_event(conn, user_id, item_id, f"{name} → {proj['name']}", "project")
-            send(chat_id, f"🔧 {name} — в проекте {proj['name']}.")
+            send(chat_id, f"{name} — в проекте {proj['name']}.")
             _inv_advance(conn, chat_id, user_id)
         else:
             _inv_show_project_picker(conn, chat_id, item)
@@ -1724,7 +1724,7 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         inv_clear_await(conn, user_id)
         inv_increment_seen(conn, user_id)
         inv_log_event(conn, user_id, item_id, name, "consumed", old_total=item["total_qty"])
-        send(chat_id, f"🗑 {name} — списал, из учёта убрано.{noted}")
+        send(chat_id, f"{name} — списал, из учёта убрано.{noted}")
         _inv_advance(conn, chat_id, user_id)
     elif action == "split" and qty is not None:
         # qty здесь = сколько ушло в проект; note = название проекта (выверено заранее).
@@ -1737,7 +1737,7 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         inv_increment_seen(conn, user_id)
         inv_log_event(conn, user_id, item_id, f"{name}: {qty:g} → {proj['name']}, свободно {remaining:g}", "split")
         unit = _unit_ru(item["unit"])
-        send(chat_id, f"🔀 {name}: {qty:g}{NBSP}{unit} → {proj['name']} (новая позиция в списке), "
+        send(chat_id, f"{name}: {qty:g}{NBSP}{unit} → {proj['name']} (новая позиция в списке), "
                       f"свободно осталось {remaining:g}{NBSP}{unit}.")
         _inv_advance(conn, chat_id, user_id)
     elif action == "multi" and extra_assignments:
@@ -1754,7 +1754,7 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
             applied.append(f"{a['qty']:g}{NBSP}{unit} → {proj['name']}")
         inv_clear_await(conn, user_id)
         inv_increment_seen(conn, user_id)
-        send(chat_id, f"🔀 {name}: " + "; ".join(applied) + f". Свободно осталось {remaining:g}{NBSP}{unit}.")
+        send(chat_id, f"{name}: " + "; ".join(applied) + f". Свободно осталось {remaining:g}{NBSP}{unit}.")
         _inv_advance(conn, chat_id, user_id)
     elif action == "skip":
         sess = inv_get(conn, user_id)
@@ -1776,7 +1776,7 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         done, total_count = inv_progress(conn, user_id)
         send(chat_id, f"Поставил на паузу: проверено {done} из {total_count}. Продолжить — /inv.")
     elif action == "note":
-        send(chat_id, f"📝 Записал заметку к «{name}». Жду ответ по наличию — кнопкой или словом («есть», «нет», «осталось 2»).")
+        send(chat_id, f"Записал заметку к «{name}». Жду ответ по наличию — кнопкой или словом («есть», «нет», «осталось 2»).")
     else:
         send(chat_id, "Не понял. Нажми кнопку под карточкой или напиши число/«есть»/«нет».")
 
@@ -1799,7 +1799,7 @@ def _add_from_amperkot(conn, chat_id: int, user_id: int, url: str, qty: int = 1)
     proposal_id = save_proposal(conn, user_id, chat_id, f"amperkot: {url}", [], proposal)
     if data["image"]:
         try:
-            send_photo(chat_id, data["image"], f"<b>{html_escape(name)}</b>\n💰 {data['price'] or '—'}{NBSP}₽")
+            send_photo(chat_id, data["image"], f"<b>{html_escape(name)}</b>\n{data['price'] or '—'}{NBSP}₽")
         except Exception:
             pass
     remember_chat(conn, user_id, "assistant", proposal["summary"])
@@ -1866,23 +1866,18 @@ def _answer_stock_question(conn, chat_id: int, text: str) -> bool:
     if len(sel) > 1 and len(units) == 1:
         tail = f"\n<b>Итого: {_fmt_qty(total_sum, sel[0]['unit'])}</b>"
 
-    def _stock_li(row):
-        # Имя + количество + явная ссылка на карточку (чтобы «дай ссылку» было сразу выполнено).
-        name = html_escape(_typo(row["name"]))
-        projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
-        proj = f"  ·  🔧{NBSP}{html_escape(projects_csv)}" if projects_csv else ""
-        url = item_web_url(row["id"])
-        return (f'<li>{name} — {_item_qty_text(row)}{proj}  ·  '
-                f'<a href="{html_escape(url)}">📖 карточка</a></li>')
-
-    rich = f"<b>{head}</b><ul>" + "".join(_stock_li(r) for r in sel) + "</ul>" + (f"<p>{tail.strip()}</p>" if tail else "")
+    # Та же строка-ссылка, что и в /list — единый вид по всему боту.
+    rich = f"<b>{head}</b><ul>" + "".join(_item_li(r) for r in sel) + "</ul>" + (f"<p>{tail.strip()}</p>" if tail else "")
     if send_rich(chat_id, rich) is not None:
         return True
-    # Откат: текст + явные ссылки.
+    # Откат: те же кликабельные строки обычным HTML-сообщением.
     lines = [head]
     for r in sel:
-        lines.append(f"• {_typo(r['name'])} — {_item_qty_text(r)}\n  📖 {item_web_url(r['id'])}")
-    send(chat_id, "\n".join(lines) + tail.replace("<b>", "").replace("</b>", ""))
+        proj = r["projects_csv"] if "projects_csv" in r.keys() else None
+        proj_part = f"  ·  {html_escape(proj)}" if proj else ""
+        lines.append(f'<a href="{html_escape(item_web_url(r["id"]))}">'
+                     f'{html_escape(_typo(r["name"]))} — {_item_qty_text(r)}{proj_part}</a>')
+    send(chat_id, "\n".join(lines) + tail, parse_mode="HTML")
     return True
 
 
@@ -1950,15 +1945,15 @@ def _layout_show_next(conn, chat_id: int, user_id: int) -> None:
     lines = [f"<i>Пункт {pos + 1}{NBSP}из{NBSP}{len(queue)}</i>",
              f"<b>{html_escape(entry['name'])}</b> ×{entry['qty']:g}{html_escape(proj_part)}"]
     if entry.get("note"):
-        lines.append(f"📝 {html_escape(entry['note'])}")
+        lines.append(f"{html_escape(entry['note'])}")
     if entry.get("user_note"):
-        lines.append(f"💬 {html_escape(entry['user_note'])}")
+        lines.append(f"{html_escape(entry['user_note'])}")
     if entry["matched_id"]:
         lines.append(f"Нашёл в базе: «{html_escape(entry['matched_name'])}» — привяжу её.")
     else:
         lines.append("В базе не нашёл — создам как неуточнённую позицию.")
     kb = {"inline_keyboard": [[
-        {"text": "✅ Да", "callback_data": "lay:yes:_"},
+        {"text": "Да", "callback_data": "lay:yes:_"},
         {"text": "⏭ Пропустить", "callback_data": "lay:skip:_"},
         {"text": "⏹ Стоп", "callback_data": "lay:stop:_"},
     ]]}
@@ -1983,9 +1978,9 @@ def _layout_apply_current(conn, chat_id: int, user_id: int) -> None:
                     item_split_to_project(conn, item["id"], entry["qty"], proj["id"])
                 else:
                     item_set_in_project(conn, item["id"], proj["id"])
-                send(chat_id, f"🔧 «{item['name']}» → {proj['name']}.")
+                send(chat_id, f"«{item['name']}» → {proj['name']}.")
             else:
-                send(chat_id, f"📝 «{item['name']}» — оставил свободной, заметку записал.")
+                send(chat_id, f"«{item['name']}» — оставил свободной, заметку записал.")
     else:
         new_id = next_item_id(conn)
         now = utc_now()
@@ -2006,7 +2001,7 @@ def _layout_apply_current(conn, chat_id: int, user_id: int) -> None:
         conn.commit()
         entry["created"] = True
         where = f"в проекте {proj['name']}" if proj else "свободной (всплывёт в «новых» для уточнения)"
-        send(chat_id, f"➕ Создал «{entry['name']}» {where}.")
+        send(chat_id, f"Создал «{entry['name']}» {where}.")
     entry["done"] = "yes"
     layout_save_queue(conn, user_id, queue, pos + 1)
     _layout_show_next(conn, chat_id, user_id)
@@ -2030,7 +2025,7 @@ def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
         item_set_category(conn, awaiting_id, cat)
         inv_clear_await(conn, user_id)
         _edit_export(conn, "category " + awaiting_id)
-        send(chat_id, f"🏷 {item['name']} → {cat}.")
+        send(chat_id, f"{item['name']} → {cat}.")
         _inv_show_back(conn, chat_id, user_id)
         return True
     if awaiting_id and sess["await_kind"] == "name":
@@ -2038,7 +2033,7 @@ def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
         item_set_name(conn, awaiting_id, new_name)
         inv_clear_await(conn, user_id)
         _edit_export(conn, "rename " + awaiting_id)
-        send(chat_id, f"✏️ Название → «{new_name}».")
+        send(chat_id, f"Название → «{new_name}».")
         _inv_show_back(conn, chat_id, user_id)
         return True
     if awaiting_id and sess["await_kind"] == "price":
@@ -2049,7 +2044,7 @@ def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
         item_set_price(conn, awaiting_id, p)
         inv_clear_await(conn, user_id)
         _edit_export(conn, "price " + awaiting_id)
-        send(chat_id, f"💰 Цена → {p:g} ₽.")
+        send(chat_id, f"Цена → {p:g} ₽.")
         _inv_show_back(conn, chat_id, user_id)
         return True
     if awaiting_id and sess["await_kind"] == "source":
@@ -2060,7 +2055,7 @@ def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
         item_set_source(conn, awaiting_id, url_m.group(0))
         inv_clear_await(conn, user_id)
         _edit_export(conn, "source " + awaiting_id)
-        send(chat_id, "🔗 Источник обновил.")
+        send(chat_id, "Источник обновил.")
         _inv_show_back(conn, chat_id, user_id)
         return True
 
@@ -2151,8 +2146,8 @@ def _handle_inv_text(conn, chat_id: int, user_id: int, sess, text: str) -> bool:
 def _inv_request_confirm(conn, chat_id: int, user_id: int, payload: dict, question: str) -> None:
     inv_set_pending(conn, user_id, payload)
     kb = {"inline_keyboard": [[
-        {"text": "✅ Да", "callback_data": "inv:cyes:_"},
-        {"text": "↩️ Нет, поясню", "callback_data": "inv:cno:_"},
+        {"text": "Да", "callback_data": "inv:cyes:_"},
+        {"text": "Нет, поясню", "callback_data": "inv:cno:_"},
     ]]}
     send_with_keyboard(chat_id, html_escape(question), kb)
 
@@ -2181,7 +2176,7 @@ def handle_message(conn, message: dict) -> None:
             pid, created = project_create(conn, text.strip())
             set_preference(conn, "newproj_prompt_msg", "")
             _edit_export(conn, f"create project {pid}")
-            send(chat_id, f"🆕 Проект «{text.strip()}» создан." if created else f"Проект «{text.strip()}» уже есть.")
+            send(chat_id, f"Проект «{text.strip()}» создан." if created else f"Проект «{text.strip()}» уже есть.")
             _project_card(conn, chat_id, pid)
             return
 
@@ -2193,8 +2188,8 @@ def handle_message(conn, message: dict) -> None:
             if ("проект" in low and any(w in low for w in ("удали", "удалить", "убери", "убрать"))) or low in ("удали", "удалить"):
                 cnt = len(project_items(conn, proj_row["id"]))
                 kb = {"inline_keyboard": [[
-                    {"text": "🗑 Да, удалить", "callback_data": f"prj:delyes:{proj_row['id']}"},
-                    {"text": "↩️ Отмена", "callback_data": f"prj:show:{proj_row['id']}"},
+                    {"text": "Да, удалить", "callback_data": f"prj:delyes:{proj_row['id']}"},
+                    {"text": "Отмена", "callback_data": f"prj:show:{proj_row['id']}"},
                 ]]}
                 send_with_keyboard(chat_id, f"Удалить проект «{html_escape(proj_row['name'])}»? "
                                             f"Его детали ({cnt}) вернутся на склад свободными.", kb)
@@ -2203,11 +2198,11 @@ def handle_message(conn, message: dict) -> None:
             if m:
                 new_name = m.group(1).strip()
                 project_rename(conn, proj_row["id"], new_name)
-                send(chat_id, f"✏️ Проект «{proj_row['name']}» теперь называется «{new_name}».")
+                send(chat_id, f"Проект «{proj_row['name']}» теперь называется «{new_name}».")
                 _project_card(conn, chat_id, proj_row["id"])
                 return
             project_set_desc(conn, proj_row["id"], text)
-            send(chat_id, f"✏️ Описание «{proj_row['name']}» обновил: {text.strip()}")
+            send(chat_id, f"Описание «{proj_row['name']}» обновил: {text.strip()}")
             return
 
     # Ответ (reply) на сообщение-черновик = правка черновика: пересобираем с уточнением.
@@ -2319,7 +2314,7 @@ def handle_message(conn, message: dict) -> None:
                     maybe_git_sync(repo_dir, "photo for " + item["id"])
                 except Exception as exc2:
                     print(f"photo export error: {exc2}", flush=True)
-                send(chat_id, f"📷 {verb} «{item['name']}»." + (" Заметку записал." if note else ""))
+                send(chat_id, f"{verb} «{item['name']}»." + (" Заметку записал." if note else ""))
                 # Покажем обновлённую карточку, чтобы было видно результат и кнопки.
                 _inv_show_item(conn, chat_id, user_id, get_item(conn, item["id"]))
             except Exception as exc:
@@ -2426,11 +2421,11 @@ def handle_message(conn, message: dict) -> None:
 def set_my_commands() -> None:
     """Register the command menu so Telegram shows hints instead of manual typing."""
     commands = [
-        {"command": "list", "description": "📋 Склад по категориям"},
-        {"command": "inv", "description": "🔍 Инвентаризация"},
-        {"command": "edit", "description": "✏️ Изменить позицию"},
-        {"command": "projects", "description": "🛠 Проекты"},
-        {"command": "newproject", "description": "🆕 Создать проект"},
+        {"command": "list", "description": "Склад по категориям"},
+        {"command": "inv", "description": "Инвентаризация"},
+        {"command": "edit", "description": "Изменить позицию"},
+        {"command": "projects", "description": "Проекты"},
+        {"command": "newproject", "description": "Создать проект"},
         {"command": "start", "description": "ℹ️ Справка"},
     ]
     try:
