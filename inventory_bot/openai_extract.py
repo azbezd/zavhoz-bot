@@ -28,6 +28,10 @@ Marketplace links (ozon, wildberries, aliexpress, avito) rot quickly and listing
 use such a link only to extract the item name, price and photo at add time, but DO NOT store it
 in source_url — leave source_url empty unless it is a stable vendor/manufacturer page
 (amperkot.ru, chipdip.ru, datasheet sites). Price is optional: use 0 when unknown, never guess.
+category MUST be exactly one of these slugs (never invent new ones, never use Russian words):
+computer, microcontroller, module, sensor, emitter, semiconductor, passive, connector, wire,
+proto, network, power, mechanical, tool. Resistors/capacitors/fuses -> passive.
+Наборы («24 номинала по 20 шт.») заводи одной позицией, qty = общее число штук (24*20=480), unit=pcs.
 ВАЖНО про существующие позиции: ниже даётся список склада в виде "id | название | количество".
 Если сообщение МЕНЯЕТ уже существующую позицию (сломал/модифицировал/переименовать/уточнить описание/
 изменить количество/поставил в проект/потерял) — НЕ создавай новую через add_item.

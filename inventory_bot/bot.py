@@ -583,12 +583,39 @@ def _send_proposal(conn, chat_id: int, proposal_id: int, proposal: dict) -> None
         conn.commit()
 
 
+_CAT_RU_FALLBACK = {
+    "резистор": "passive", "конденсатор": "passive", "пассив": "passive", "предохранит": "passive",
+    "модул": "module", "дисплe": "emitter", "диспле": "emitter", "светодиод": "emitter",
+    "плат": "proto", "макет": "proto", "датчик": "sensor", "сенсор": "sensor",
+    "провод": "wire", "кабел": "wire", "разъём": "connector", "разъем": "connector",
+    "инструмент": "tool", "питани": "power", "аккум": "power", "механ": "mechanical", "крепёж": "mechanical",
+}
+
+
+def _sanitize_proposal(proposal: dict, source_text: str) -> dict:
+    """Детерминированные починки черновика после модели:
+    1) если в сообщении была ссылка, а add_item без source_url — вставляем её сами
+       (модель часто перестраховывается и оставляет пусто, теряя источник);
+    2) категория только из нашего списка: выдуманное («Резисторы») мапим на слаг."""
+    url_m = re.search(r"https?://\S+", source_text or "")
+    for op in proposal.get("operations", []):
+        if op.get("op") != "add_item":
+            continue
+        if url_m and not (op.get("source_url") or "").strip():
+            op["source_url"] = url_m.group(0).rstrip(".,;)")
+        cat = (op.get("category") or "").strip()
+        if cat and cat not in CATEGORY_LABELS:
+            low = cat.lower()
+            op["category"] = next((slug for stem, slug in _CAT_RU_FALLBACK.items() if stem in low), "unknown")
+    return proposal
+
+
 def _rebuild_draft(conn, chat_id: int, user_id: int, old_id: int, old_text: str, addition: str) -> None:
     """Пересобрать черновик с уточнением пользователя (правка без потери скрейпленных полей)."""
     send_chat_action(chat_id, "typing")
     combined = (old_text or "") + "\n\nУточнение от пользователя: " + addition
     try:
-        proposal = extract_inventory_proposal(combined, [], _inventory_id_snapshot(conn))
+        proposal = _sanitize_proposal(extract_inventory_proposal(combined, [], _inventory_id_snapshot(conn)), combined)
     except Exception as exc:
         send(chat_id, f"Уточнение принял, но пересобрать черновик не вышло: {exc}")
         return
@@ -2384,7 +2411,9 @@ def handle_message(conn, message: dict) -> None:
         send_chat_action(chat_id, "typing")
         send(chat_id, "Понял, похоже на изменение склада. Сейчас соберу черновик, ничего сам не запишу без подтверждения.")
         try:
-            proposal = extract_inventory_proposal(text, [os.path.join(repo_dir, path) for path in photo_paths], _inventory_id_snapshot(conn))
+            proposal = _sanitize_proposal(
+                extract_inventory_proposal(text, [os.path.join(repo_dir, path) for path in photo_paths], _inventory_id_snapshot(conn)),
+                text)
             ops = proposal.get("operations", [])
             if ops and all(o.get("op") == "ask_user" for o in ops):
                 # Нечего применять — просто спросим, без черновика и кнопок.
