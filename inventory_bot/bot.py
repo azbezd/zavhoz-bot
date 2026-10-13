@@ -762,7 +762,7 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
         if sess:
             done, total_count = inv_progress(conn, user_id)
             kb = {"inline_keyboard": [[
-                {"text": f"▶️ Продолжить ({total_count - done} осталось)", "callback_data": "inv:resume:_"},
+                {"text": f"Продолжить ({total_count - done} осталось)", "callback_data": "inv:resume:_"},
                 {"text": "Начать заново", "callback_data": "inv:restart:_"},
             ]]}
             send_with_keyboard(chat_id, f"Инвентаризация уже идёт: проверено {done} из {total_count}.", kb)
@@ -904,10 +904,10 @@ def _inv_keyboard(item_id: str, skipped_count: int = 0, pass_no: int = 1) -> dic
         ],
         [
             {"text": "В проекте", "callback_data": f"inv:proj:{item_id}"},
-            {"text": "⏭ Пропустить", "callback_data": f"inv:skip:{item_id}"},
+            {"text": "Пропустить", "callback_data": f"inv:skip:{item_id}"},
         ],
     ]
-    last_row = [{"text": "⏹ Завершить", "callback_data": "inv:stop:_"}]
+    last_row = [{"text": "Завершить", "callback_data": "inv:stop:_"}]
     if pass_no == 1 and skipped_count:
         last_row.append({"text": f"Пропущенные ({skipped_count})", "callback_data": "inv:retskip:_"})
     rows.append(last_row)
@@ -1304,7 +1304,7 @@ def _inv_finish_with_summary(conn, chat_id: int, user_id: int) -> None:
         for e in consumed + lost:
             lines.append(f"  • {html_escape(e['item_name'])}")
     if unchecked:
-        lines.append(f"⏭ Не проверено: {unchecked} — всплывут при следующем /inv")
+        lines.append(f"Не проверено: {unchecked} — всплывут при следующем /inv")
     inv_finish(conn, user_id)
 
     synced = ""
@@ -1334,8 +1334,7 @@ def handle_callback_query(conn, callback: dict) -> None:
     if chat_type != "private":
         answer_callback(cb_id)
         return
-    allowed = allowed_user_ids()
-    if allowed and user_id not in allowed:
+    if user_id not in allowed_user_ids():
         answer_callback(cb_id)
         return
 
@@ -1810,13 +1809,13 @@ def _inv_apply_action(conn, chat_id: int, user_id: int, item, action: str,
         if sess and sess["pass_no"] >= 2:
             skipped = [sid for sid in inv_skipped(conn, user_id) if sid != item_id]
             inv_set_skipped(conn, user_id, skipped)
-            send(chat_id, f"⏭ {name} — оставил непроверенной.{noted}")
+            send(chat_id, f"{name} — оставил непроверенной.{noted}")
         else:
             skipped = inv_skipped(conn, user_id)
             if item_id not in skipped:
                 skipped.append(item_id)
             inv_set_skipped(conn, user_id, skipped)
-            send(chat_id, f"⏭ {name} — отложил, вернёмся в конце или по /skipped.{noted}")
+            send(chat_id, f"{name} — отложил, вернёмся в конце или по /skipped.{noted}")
         _inv_advance(conn, chat_id, user_id)
     elif action == "stop":
         _inv_finish_with_summary(conn, chat_id, user_id)
@@ -2006,8 +2005,8 @@ def _layout_show_next(conn, chat_id: int, user_id: int) -> None:
         lines.append("В базе не нашёл — создам как неуточнённую позицию.")
     kb = {"inline_keyboard": [[
         {"text": "Да", "callback_data": "lay:yes:_"},
-        {"text": "⏭ Пропустить", "callback_data": "lay:skip:_"},
-        {"text": "⏹ Стоп", "callback_data": "lay:stop:_"},
+        {"text": "Пропустить", "callback_data": "lay:skip:_"},
+        {"text": "Стоп", "callback_data": "lay:stop:_"},
     ]]}
     send_with_keyboard(chat_id, "\n".join(lines), kb)
 
@@ -2214,8 +2213,8 @@ def handle_message(conn, message: dict) -> None:
     # user_id, no chat activity from groups/channels. Silent drop.
     if chat_type != "private":
         return
-    allowed = allowed_user_ids()
-    if allowed and user_id not in allowed:
+    # Пустой список = закрыто для всех: иначе любой нашедший бота тратил бы ключ OpenAI.
+    if user_id not in allowed_user_ids():
         return
 
     text = message.get("text") or message.get("caption") or ""
@@ -2480,7 +2479,7 @@ def set_my_commands() -> None:
         {"command": "edit", "description": "Изменить позицию"},
         {"command": "projects", "description": "Проекты"},
         {"command": "newproject", "description": "Создать проект"},
-        {"command": "start", "description": "ℹ️ Справка"},
+        {"command": "start", "description": "Справка"},
     ]
     try:
         telegram("setMyCommands", {"commands": json.dumps(commands, ensure_ascii=False)})
@@ -2501,6 +2500,9 @@ def main() -> None:
     send_errors = 0
     allowed = ",".join(str(item) for item in sorted(allowed_user_ids())) or "none"
     print(f"inventory bot started allowed_user_ids={allowed}", flush=True)
+    if allowed == "none":
+        print("WARNING: ALLOWED_TELEGRAM_USER_IDS пуст — бот никому не отвечает. "
+              "Впиши свой Telegram user id.", flush=True)
     while True:
         try:
             updates = telegram(
