@@ -111,8 +111,7 @@ def chat_reply(conn, user_id: int, text: str, recent_messages, preferences: dict
         with urllib.request.urlopen(req, timeout=60) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"OpenAI HTTP {exc.code}: {body}") from exc
+        raise RuntimeError(f"OpenAI HTTP {exc.code}") from None
 
     parts = []
     for output in raw.get("output", []):
@@ -304,8 +303,7 @@ def chat_reply_stream(conn, user_id: int, text: str, recent_messages, preference
     try:
         resp = urllib.request.urlopen(req, timeout=60)
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"OpenAI HTTP {exc.code}: {body}") from exc
+        raise RuntimeError(f"OpenAI HTTP {exc.code}") from None
 
     # SSE: each event is one or more "data: <json>" lines terminated by blank line.
     data_lines: list[str] = []

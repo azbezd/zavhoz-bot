@@ -8,3 +8,10 @@ __pycache__/
 *.log
 
 data/
+
+*.db-*
+*.sqlite-*
+*.db.*
+*.sqlite.*
+private/
+site/

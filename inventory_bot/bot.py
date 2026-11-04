@@ -219,24 +219,41 @@ def telegram(method: str, payload: dict | None = None, timeout: int = 30) -> dic
     if payload is not None:
         data = urllib.parse.urlencode(payload).encode("utf-8")
     req = urllib.request.Request(f"{API_BASE}/bot{token()}/{method}", data=data, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"Telegram {method}: {type(exc).__name__}") from None
     if not body.get("ok", False):
-        raise RuntimeError(f"telegram {method} returned ok=false: {body}")
+        raise RuntimeError(f"Telegram {method}: request rejected")
     return body
 
 
 def send(chat_id: int, text: str, parse_mode: str | None = None, disable_web_page_preview: bool = True,
          return_id: bool = False):
-    payload = {"chat_id": chat_id, "text": text[:3900]}
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-    if disable_web_page_preview:
-        payload["disable_web_page_preview"] = "true"
-    body = telegram("sendMessage", payload)
-    if return_id:
-        return body.get("result", {}).get("message_id")
-    return None
+    # Oversized HTML falls back to readable plain text, never cut inside tags.
+    if len(text.encode("utf-16-le")) > 7000 and parse_mode:
+        from html.parser import HTMLParser
+        class Plain(HTMLParser):
+            def __init__(self):super().__init__();self.parts=[]
+            def handle_data(self,data):self.parts.append(data)
+            def handle_endtag(self,tag):
+                if tag in ("p","div","blockquote","li"):self.parts.append("\n")
+        parser=Plain();parser.feed(text);text="".join(parser.parts);parse_mode=None
+    chunks=[];current="";size=0
+    for char in text:
+        n=len(char.encode("utf-16-le"))//2
+        if size+n>3500:chunks.append(current);current="";size=0
+        current+=char;size+=n
+    if current:chunks.append(current)
+    last=None
+    for chunk in chunks:
+        payload={"chat_id":chat_id,"text":chunk}
+        if parse_mode:payload["parse_mode"]=parse_mode
+        if disable_web_page_preview:payload["disable_web_page_preview"]="true"
+        body=telegram("sendMessage",payload)
+        last=body.get("result",{}).get("message_id")
+    return last if return_id else None
 
 
 def send_html(chat_id: int, text: str) -> None:
@@ -283,6 +300,7 @@ CATEGORY_LABELS = {
 STATUS_LABELS = {
     "stock": "в наличии",
     "ordered": "ожидаю",
+    "quarantine": "несоответствие поставки",
     "reserved": "зарезервировано",
     "in_use": "в проекте",
     "consumable": "расходник",
@@ -305,7 +323,11 @@ def send_photo(chat_id: int, photo_url: str, caption: str, reply_markup: dict | 
     path relative to the inventory repo (uploaded as multipart). Returns message_id."""
     if not photo_url.startswith("http") and ("/" in photo_url or photo_url.endswith(".jpg") or photo_url.endswith(".png")):
         repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
-        return _send_photo_file(chat_id, os.path.join(repo_dir, photo_url), caption, reply_markup)
+        path=os.path.realpath(os.path.join(repo_dir,photo_url))
+        allowed=os.path.realpath(os.path.join(repo_dir,"photos"))+os.sep
+        if not path.startswith(allowed) or not path.lower().endswith((".jpg",".jpeg",".png",".webp")):
+            return None
+        return _send_photo_file(chat_id, path, caption, reply_markup)
     payload = {
         "chat_id": chat_id,
         "photo": photo_url,
@@ -325,6 +347,12 @@ def send_photo(chat_id: int, photo_url: str, caption: str, reply_markup: dict | 
 def _item_qty_text(row) -> str:
     qty = row["available_qty"]
     total = row["total_qty"]
+    status=row["status"] if "status" in row.keys() else ""
+    basis=row["quantity_basis"] if "quantity_basis" in row.keys() else ""
+    if status in ("ordered","quarantine"):
+        return f"{STATUS_LABELS[status]}: {_fmt_qty(total,row['unit'])}; свободно 0"
+    if basis=="purchase":
+        return f"{_fmt_qty(qty,row['unit'])} по закупке · остаток не проверен"
     projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
     if projects_csv:
         return _fmt_qty(total, row["unit"])
@@ -339,6 +367,8 @@ def _item_li(row) -> str:
     projects_csv = row["projects_csv"] if "projects_csv" in row.keys() else None
     proj_part = f"  ·  {html_escape(projects_csv)}" if projects_csv else ""
     inner = f"{name} — {_item_qty_text(row)}{proj_part}"
+    if ("public_visible" in row.keys() and not row["public_visible"]) or row["status"] in ("quarantine", "retired", "lost"):
+        return f"<li>{inner}</li>"
     return f'<li><a href="{html_escape(item_web_url(row["id"]))}">{inner}</a></li>'
 
 
@@ -421,9 +451,9 @@ def _send_photo_file(chat_id: int, abs_path: str, caption: str, reply_markup: di
             body = json.loads(resp.read().decode("utf-8"))
         if body.get("ok"):
             return body.get("result", {}).get("message_id")
-        print(f"sendPhoto upload not ok: {body}", flush=True)
+        print("sendPhoto upload rejected", flush=True)
     except Exception as exc:
-        print(f"sendPhoto upload error: {exc}", flush=True)
+        print(f"sendPhoto upload error: {type(exc).__name__}", flush=True)
     return None
 
 
@@ -733,16 +763,16 @@ def handle_command(conn, chat_id: int, user_id: int, text: str) -> None:
         send(chat_id, (f"Проект «{name}» создан." if created else f"Проект «{name}» уже есть."))
         _project_card(conn, chat_id, pid)
     elif cmd == "/show" and len(parts) == 2:
-        row = get_proposal(conn, int(parts[1]))
+        row = get_proposal(conn, int(parts[1]), user_id=user_id)
         if not row:
             send(chat_id, "Proposal not found.")
             return
         send(chat_id, format_proposal(conn, row["id"], json.loads(row["proposal_json"])))
     elif cmd == "/discard" and len(parts) == 2:
-        ok = discard_proposal(conn, int(parts[1]))
+        ok = discard_proposal(conn, int(parts[1]), user_id=user_id)
         send(chat_id, "Ок, выкинул черновик." if ok else "Такого активного черновика нет.")
     elif cmd == "/apply" and len(parts) == 2:
-        result = apply_proposal(conn, int(parts[1]))
+        result = apply_proposal(conn, int(parts[1]), user_id=user_id)
         send(chat_id, "Готово, внёс в склад.")
         _enrich_new_items(conn, chat_id, result)
         export_items(repo_dir)
@@ -938,7 +968,7 @@ def _enrich_new_items(conn, chat_id: int, apply_result: dict) -> None:
         if enr.get("amperkot_url"):
             try:
                 d = scrape_amperkot(enr["amperkot_url"])
-                item_set_source(conn, iid, enr["amperkot_url"], "amperkot.ru")
+                item_set_source(conn, iid, enr["amperkot_url"], "amperkot.ru", kind="reference")
                 if d.get("image"):
                     got_photo = item_fetch_photo(conn, iid, d["image"], repo_dir)
             except Exception as exc:
@@ -1204,7 +1234,12 @@ def _inv_show_item(conn, chat_id: int, user_id: int, item) -> None:
         lines.append(f"{price:g}{NBSP}₽")
     if src_url:
         lines.append(f'<a href="{html_escape(src_url)}">{html_escape(src_title or "источник")}</a>')
-    lines.append(f'<a href="{html_escape(item_web_url(item["id"]))}">карточка в вебе</a>')
+    if item["quantity_basis"] == "purchase":
+        lines.append("Количество по закупке; физический остаток не проверен.")
+    if item["status"] in ("ordered","quarantine"):
+        lines.append(STATUS_LABELS[item["status"]])
+    if item["public_visible"]:
+        lines.append(f'<a href="{html_escape(item_web_url(item["id"]))}">карточка в вебе</a>')
     caption = "\n".join(lines)
     photo = item_first_photo(conn, item["id"])
     kb = _inv_keyboard(item["id"], skipped_count=len(skipped), pass_no=pass_no)
@@ -1407,7 +1442,7 @@ def handle_callback_query(conn, callback: dict) -> None:
         if prop_act == "yes":
             answer_callback(cb_id, "Применяю")
             try:
-                result = apply_proposal(conn, prop_id)
+                result = apply_proposal(conn, prop_id, user_id=user_id)
                 send(chat_id, "Готово, внёс в склад.")
                 _enrich_new_items(conn, chat_id, result)
                 export_items(repo_dir)
@@ -1416,7 +1451,7 @@ def handle_callback_query(conn, callback: dict) -> None:
                 send(chat_id, f"Не получилось применить черновик #{prop_id}: {exc}")
         else:
             answer_callback(cb_id, "Отменил")
-            discard_proposal(conn, prop_id)
+            discard_proposal(conn, prop_id, user_id=user_id)
             send(chat_id, f"Черновик #{prop_id} выкинул.")
         return
 
@@ -2207,7 +2242,7 @@ def handle_message(conn, message: dict) -> None:
     chat_id = int(message["chat"]["id"])
     chat_type = message.get("chat", {}).get("type", "private")
     user_id = int(message.get("from", {}).get("id", 0))
-    print(f"message chat_id={chat_id} chat_type={chat_type} user_id={user_id} text={message.get('text')!r} has_photo={bool(message.get('photo'))}", flush=True)
+    print(f"message chat_id={chat_id} chat_type={chat_type} user_id={user_id} has_photo={bool(message.get('photo'))}", flush=True)
     # Hard rule: only respond in private chats with explicitly whitelisted users.
     # Don't acknowledge anything outside that — no "access denied", no echoed
     # user_id, no chat activity from groups/channels. Silent drop.
@@ -2283,7 +2318,7 @@ def handle_message(conn, message: dict) -> None:
             if fresh:
                 repo_dir = os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
                 try:
-                    result = apply_proposal(conn, pend["id"])
+                    result = apply_proposal(conn, pend["id"], user_id=user_id)
                     send(chat_id, "Готово, внёс в склад.")
                     _enrich_new_items(conn, chat_id, result)
                     export_items(repo_dir)
@@ -2308,7 +2343,7 @@ def handle_message(conn, message: dict) -> None:
                         "не пойдёт", "не годится", "мимо", "отмена", "отмени", "не надо"}
             CANCEL = {"отмена", "отмени", "не надо", "выкинь", "удали черновик"}
             if low in CANCEL:
-                discard_proposal(conn, pend["id"])
+                discard_proposal(conn, pend["id"], user_id=user_id)
                 send(chat_id, "Ок, черновик выкинул.")
                 return
             if low in NEGATIVE:
@@ -2496,7 +2531,7 @@ def main() -> None:
     if imported:
         print(f"seeded inventory from yaml changes={imported}", flush=True)
     set_my_commands()
-    offset = 0
+    offset = int(conn.execute("SELECT COALESCE(MAX(update_id)+1,0) FROM processed_updates").fetchone()[0])
     send_errors = 0
     allowed = ",".join(str(item) for item in sorted(allowed_user_ids())) or "none"
     print(f"inventory bot started allowed_user_ids={allowed}", flush=True)
@@ -2513,25 +2548,41 @@ def main() -> None:
             if updates.get("result"):
                 print(f"received updates count={len(updates.get('result', []))} offset={offset}", flush=True)
             for update in updates.get("result", []):
-                offset = max(offset, int(update["update_id"]) + 1)
+                update_id = int(update["update_id"])
+                if conn.execute("SELECT 1 FROM processed_updates WHERE update_id=?", (update_id,)).fetchone():
+                    offset = max(offset, update_id + 1)
+                    continue
+                # Claim before side effects: a crash is visible as processing, never
+                # silently replayed as a second stock mutation.
+                conn.execute("INSERT INTO processed_updates VALUES (?, 'processing', datetime('now'))", (update_id,))
+                conn.commit()
+                update_failed = False
                 if "callback_query" in update:
                     try:
                         handle_callback_query(conn, update["callback_query"])
                     except Exception as exc:
-                        print(f"callback_query error: {type(exc).__name__}: {exc}", flush=True)
+                        conn.rollback()
+                        update_failed = True
+                        print(f"callback_query error: {type(exc).__name__}", flush=True)
                 elif "message" in update:
                     try:
                         handle_message(conn, update["message"])
                     except Exception as exc:
-                        print(f"message error: {type(exc).__name__}: {exc}", flush=True)
+                        conn.rollback()
+                        update_failed = True
+                        print(f"message error: {type(exc).__name__}", flush=True)
                         try:
-                            send(int(update["message"]["chat"]["id"]), f"Сбой при обработке: {exc}")
+                            send(int(update["message"]["chat"]["id"]), "Не удалось завершить обработку. Проверь черновик и повтори команду.")
                         except Exception:
                             pass
+                conn.execute("UPDATE processed_updates SET state=?, updated_at=datetime('now') WHERE update_id=?",
+                             ("failed" if update_failed else "done", update_id))
+                conn.commit()
+                offset = max(offset, update_id + 1)
             send_errors = 0
         except Exception as exc:
             send_errors += 1
-            print(f"bot error #{send_errors}: {exc}", flush=True)
+            print(f"bot error #{send_errors}: {type(exc).__name__}", flush=True)
             time.sleep(min(60, 2 * send_errors))
 
 

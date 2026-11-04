@@ -8,6 +8,12 @@
 import html
 import os
 import shutil
+import hashlib
+import json
+import sqlite3
+import tempfile
+from pathlib import Path
+from .safety import item_id_valid, web_url
 
 try:
     from .storage import connect
@@ -30,6 +36,8 @@ CATEGORY_LABELS = {
     "power": "Питание",
     "mechanical": "Механика",
     "tool": "Инструменты",
+    "storage": "Хранение",
+    "other": "Прочее",
 }
 
 E = lambda s: html.escape(str(s or ""))
@@ -48,249 +56,133 @@ _CHEVRON = ('<svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="
             'aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>')
 
 
-def _css() -> str:
-    return """
-:root{
-  --bg:#0d1014; --bg2:#11151b; --card:#161b22; --card-h:#1b212b;
-  --line:#232a35; --line2:#2e3744; --fg:#e8ebf0; --mut:#97a1b0; --mut2:#6f7a89;
-  --acc:#5b9dd9; --acc-soft:rgba(91,157,217,.14); --shadow:rgba(3,6,12,.55);
-  --w:1320px; --r:14px; --r-sm:10px;
-}
-*{box-sizing:border-box}
-html{-webkit-text-size-adjust:100%}
-body{margin:0;background:var(--bg);color:var(--fg);
-  font:16px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  font-feature-settings:"cv11","ss01";text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased}
-a{color:inherit;text-decoration:none}
-:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
-.num{font-variant-numeric:tabular-nums}
-
-header.top{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);
-  backdrop-filter:blur(10px);border-bottom:1px solid var(--line);padding:14px clamp(16px,4vw,40px)}
-.top .row{max-width:var(--w);margin:0 auto;display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
-.top .brand{font-size:17px;font-weight:650;letter-spacing:-.01em}
-.top .sub{color:var(--mut);font-size:13px}
-.back{display:inline-flex;align-items:center;gap:6px;color:var(--mut);font-size:14px;font-weight:500;
-  padding:6px 10px;margin:-6px 0;border-radius:var(--r-sm);transition:color .2s,background .2s}
-.back:hover{color:var(--fg);background:var(--card)}
-.back .chev{transition:transform .2s}.back:hover .chev{transform:translateX(-2px)}
-
-main{max-width:var(--w);margin:0 auto;padding:clamp(16px,3vw,30px) clamp(16px,4vw,40px) 64px}
-
-.search{width:100%;max-width:520px;padding:12px 15px;margin:4px 0 26px;background:var(--bg2);
-  border:1px solid var(--line);border-radius:var(--r-sm);color:var(--fg);font-size:15px;transition:border-color .2s}
-.search::placeholder{color:var(--mut2)}
-.search:focus{outline:none;border-color:var(--acc)}
-
-.cat{display:flex;align-items:baseline;gap:10px;margin:34px 0 14px}
-.cat h2{margin:0;font-size:14px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--mut)}
-.cat .n{font-size:13px;color:var(--mut2);font-variant-numeric:tabular-nums}
-.cat::after{content:"";flex:1;height:1px;background:var(--line);align-self:center}
-
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(178px,1fr));gap:14px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;
-  display:flex;flex-direction:column;transition:transform .18s ease,border-color .18s,box-shadow .18s}
-.card:hover{transform:translateY(-3px);border-color:var(--line2);box-shadow:0 10px 26px -12px var(--shadow)}
-.card .ph{aspect-ratio:1;background:#0a0d12 center/cover no-repeat;border-bottom:1px solid var(--line)}
-.card .ph.empty{display:flex;align-items:center;justify-content:center;color:var(--mut2);font-size:12px}
-.card .b{padding:11px 12px 13px;display:flex;flex-direction:column;gap:3px}
-.card .nm{font-size:13.5px;line-height:1.4;font-weight:500;
-  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.card .cap{font-size:11.5px;color:var(--mut2)}
-
-/* карточка-страница: две колонки на широком экране */
-.item{display:grid;grid-template-columns:minmax(0,440px) minmax(0,1fr);gap:clamp(20px,3vw,44px);align-items:start}
-@media (max-width:820px){.item{grid-template-columns:1fr;gap:22px}}
-.gallery{position:sticky;top:84px;display:flex;flex-direction:column;gap:12px;min-width:0}
-@media (max-width:820px){.gallery{position:static}}
-.gallery a{display:block;background:#0a0d12;border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
-.gallery img{display:block;width:100%;height:auto}
-.gallery .none{padding:48px;text-align:center;color:var(--mut2);background:var(--bg2);
-  border:1px dashed var(--line2);border-radius:var(--r)}
-.info{min-width:0}
-.info h1{margin:0 0 12px;font-size:clamp(22px,3.4vw,30px);line-height:1.18;
-  letter-spacing:-.02em;font-weight:680;text-wrap:balance}
-.badge{display:inline-block;padding:4px 11px;background:var(--acc-soft);color:var(--acc);
-  border-radius:999px;font-size:12.5px;font-weight:600}
-
-.specs{margin:24px 0 0;border-top:1px solid var(--line)}
-.specs .pair{display:grid;grid-template-columns:minmax(120px,200px) 1fr;gap:8px 20px;
-  padding:11px 2px;border-bottom:1px solid var(--line)}
-.specs .k{color:var(--mut);font-size:14px}
-.specs .v{font-variant-numeric:tabular-nums}
-@media (max-width:520px){.specs .pair{grid-template-columns:1fr;gap:2px;padding:9px 2px}}
-
-.sect{margin:30px 0 10px;font-size:13px;font-weight:600;letter-spacing:.05em;
-  text-transform:uppercase;color:var(--mut)}
-.prose{max-width:68ch;color:#d6dbe3;line-height:1.65}
-.docs{display:flex;flex-direction:column;gap:2px}
-.docs a{display:inline-flex;align-items:center;gap:9px;padding:9px 0;color:var(--acc);
-  border-bottom:1px solid var(--line);transition:padding-left .2s,color .2s}
-.docs a:last-child{border-bottom:0}
-.docs a:hover{padding-left:5px}
-.docs a::before{content:"";flex:none;width:6px;height:6px;border-right:1.6px solid currentColor;
-  border-bottom:1.6px solid currentColor;transform:rotate(-45deg);opacity:.7}
-
-footer{max-width:var(--w);margin:0 auto;padding:30px clamp(16px,4vw,40px);
-  color:var(--mut2);font-size:12.5px;border-top:1px solid var(--line)}
-.idline{margin-top:30px;color:var(--mut2);font-size:12px;font-variant-numeric:tabular-nums}
-.empty-all{padding:80px 20px;text-align:center;color:var(--mut)}
-"""
+def _head(title, prefix="", desc="Фото, назначение, характеристики и документация электронных компонентов."):
+    return f'''<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; object-src 'none'">
+<meta name="referrer" content="no-referrer"><meta name="color-scheme" content="dark">
+<title>{E(title)}</title><meta name="description" content="{E(desc)}">
+<link rel="icon" href="{FAVICON}"><link rel="stylesheet" href="{prefix}assets/style.css">
+<script src="{prefix}assets/catalog.js" defer></script></head><body>
+<a class="skip" href="#main">К содержимому</a>'''
 
 
-def _head(title, css_href, *, desc="Открытый справочник электронных компонентов: фото, характеристики и официальная документация.") -> str:
-    return (f'<!doctype html><html lang="ru"><head><meta charset="utf-8">'
-            f'<meta name="viewport" content="width=device-width,initial-scale=1">'
-            f'<title>{title}</title><meta name="description" content="{E(desc)}">'
-            f'<meta property="og:title" content="{title}"><meta property="og:description" content="{E(desc)}">'
-            f'<meta property="og:type" content="website"><meta name="color-scheme" content="dark">'
-            f'<link rel="icon" href="{FAVICON}">'
-            f'<link rel="stylesheet" href="{css_href}"></head>')
+def _knowledge(conn, item_id):
+    row = conn.execute("SELECT * FROM item_knowledge WHERE item_id=?", (item_id,)).fetchone()
+    try:
+        specs = json.loads(row["specs_json"]) if row else {}
+    except (TypeError, ValueError):
+        specs = {}
+    return (row["summary"] if row else ""), specs if isinstance(specs, dict) else {}
 
 
-def _first_photo(conn, item_id):
-    r = conn.execute("SELECT path FROM item_photos WHERE item_id=? ORDER BY rowid LIMIT 1", (item_id,)).fetchone()
-    return r["path"] if r else ""
+def _photos(conn, item_id):
+    return [r[0] for r in conn.execute("SELECT p.path FROM item_photos p JOIN approved a ON a.path=p.path WHERE p.item_id=? ORDER BY p.rowid", (item_id,))]
 
 
 def _index_html(conn, groups, order, count):
-    # Публичный каталог: только справочные данные. Без количеств/наличия.
-    sec = []
+    sections=[]
     for cat in order:
-        items = groups[cat]
-        sec.append(f'<section class="block" data-cat><div class="cat"><h2>{E(CATEGORY_LABELS.get(cat, cat))}</h2>'
-                   f'<span class="n">{len(items)}</span></div><div class="grid">')
-        for it in items:
-            ph = _first_photo(conn, it["id"])
-            ph_html = (f'<div class="ph" style="background-image:url(&quot;{E(ph)}&quot;)"></div>'
-                       if ph else '<div class="ph empty">нет фото</div>')
-            sec.append(
-                f'<a class="card" href="item/{E(it["id"])}.html" data-name="{E(it["name"]).lower()}">'
-                f'{ph_html}<div class="b"><div class="nm">{E(it["name"])}</div></div></a>'
-            )
-        sec.append('</div></section>')
-    body = "\n".join(sec)
-    return f"""{_head("Завхоз — каталог электроники", "assets/style.css")}<body>
-<header class="top"><div class="row"><span class="brand">Завхоз — каталог электроники</span>
-<span class="sub num">{count} компонентов · справочник с описаниями и документацией</span></div></header>
-<main>
-<input class="search" id="q" type="search" placeholder="Поиск по названию" aria-label="Поиск по названию" oninput="flt()">
-<div id="list">{body}</div>
-<p class="empty-all" id="nores" hidden>Ничего не найдено</p>
-</main>
-<footer>Открытый справочник компонентов. Наличие и применение хранятся приватно.</footer>
-<script>
-function flt(){{var v=document.getElementById('q').value.trim().toLowerCase(),shown=0;
-document.querySelectorAll('.card').forEach(function(c){{var m=c.dataset.name.indexOf(v)>=0;c.hidden=!m;if(m)shown++;}});
-document.querySelectorAll('[data-cat]').forEach(function(s){{
-var any=[].some.call(s.querySelectorAll('.card'),function(c){{return !c.hidden;}});s.hidden=!any;}});
-document.getElementById('nores').hidden=shown>0;}}
-</script>
-</body></html>"""
+        label=CATEGORY_LABELS.get(cat,cat)
+        cards=[]
+        for it in groups[cat]:
+            summary,specs=_knowledge(conn,it['id'])
+            photos=_photos(conn,it['id'])
+            picture=(f'<img class="ph" src="{E(photos[0])}" alt="" loading="lazy" width="280" height="280">' if photos else '<div class="ph empty">Фото уточняется</div>')
+            search=' '.join([it['name'],it['id'],label,summary,it['description'],json.dumps(specs,ensure_ascii=False)])
+            cards.append(f'<a class="card" aria-label="{E(it["name"])}" href="item/{E(it["id"])}.html" data-search="{E(search)}">{picture}<div class="b"><div class="nm">{E(it["name"])}</div><p class="summary">{E(summary or it["description"])}</p></div></a>')
+        sections.append(f'<section class="block" data-cat="{E(cat)}"><div class="cat"><h2>{E(label)}</h2><span class="n">{len(cards)}</span></div><div class="grid">{"".join(cards)}</div></section>')
+    options=''.join(f'<option value="{E(c)}">{E(CATEGORY_LABELS.get(c,c))}</option>' for c in order)
+    return f'''{_head("Завхоз · Справочник электроники")}
+<header class="top"><div class="row"><span class="brand">Завхоз</span><span class="sub">Справочник электроники</span></div></header>
+<main id="main"><h1>Найди нужную деталь</h1><p class="intro">Фото, назначение и документация — всё в карточке компонента.</p>
+<div class="filters"><label>Название или назначение<input id="q" type="search" placeholder="Например, PCA9685 или сервопривод" autocomplete="off"></label>
+<label>Категория<select id="category"><option value="">Все категории</option>{options}</select></label><button id="clear" type="button">Сбросить</button></div>
+<p id="results" class="results" role="status" aria-live="polite">Компонентов: {count}</p>
+<div id="list">{''.join(sections)}</div><div id="nores" class="empty-all" hidden><h2>Ничего не найдено</h2><p>Сократи запрос или выбери другую категорию.</p></div></main>
+<footer>Открытый справочник. Количество, покупки и применение в проектах хранятся приватно.</footer></body></html>'''
 
 
-def _item_html(conn, it):
-    # Публичная карточка-справочник. БЕЗ количества, наличия, проектов, заметок, цены.
-    photos = [r["path"] for r in conn.execute("SELECT path FROM item_photos WHERE item_id=? ORDER BY rowid", (it["id"],))]
-    manuals = conn.execute("SELECT url_or_path, title FROM item_manuals WHERE item_id=? ORDER BY rowid", (it["id"],)).fetchall()
-    know = conn.execute("SELECT summary, specs_json FROM item_knowledge WHERE item_id=?", (it["id"],)).fetchone()
-
-    if photos:
-        gal = "".join(f'<a href="../{E(p)}" target="_blank" rel="noopener">'
-                      f'<img src="../{E(p)}" loading="lazy" alt="{E(it["name"])}"></a>' for p in photos)
-    else:
-        gal = '<div class="none">фото нет</div>'
-
-    pairs = [("Категория", E(CATEGORY_LABELS.get(it["category"], it["category"])))]
-    specs = {}
-    if know and know["specs_json"]:
-        try:
-            import json as _json
-            specs = _json.loads(know["specs_json"]) or {}
-        except Exception:
-            specs = {}
-    for k, v in specs.items():
-        if v:
-            pairs.append((E(k), E(v)))
-    specs_html = "".join(f'<div class="pair"><div class="k">{k}</div><div class="v">{v}</div></div>' for k, v in pairs)
-
-    extra = []
-    summary = know["summary"] if know else ""
-    if summary:
-        extra.append(f'<div class="sect">Кратко</div><p class="prose">{E(summary)}</p>')
-    if it["description"]:
-        extra.append(f'<div class="sect">Описание</div><p class="prose">{E(it["description"])}</p>')
-    if manuals:
-        links = "".join(
-            f'<a href="{E(m["url_or_path"])}" target="_blank" rel="noopener">{E(m["title"] or m["url_or_path"])}</a>'
-            for m in manuals
-        )
-        extra.append(f'<div class="sect">Документация</div><div class="docs">{links}</div>')
-    extra_html = "\n".join(extra)
-
-    return f"""{_head(E(it["name"]) + " · Завхоз", "../assets/style.css", desc=(summary or it["description"] or it["name"]))}<body>
-<header class="top"><div class="row"><a class="back" href="../index.html">{_CHEVRON}Каталог</a></div></header>
-<main><article class="item">
-<figure class="gallery">{gal}</figure>
-<div class="info">
-<h1>{E(it["name"])}</h1>
-<span class="badge">{E(CATEGORY_LABELS.get(it["category"], it["category"]))}</span>
-<div class="specs">{specs_html}</div>
-{extra_html}
-<div class="idline">id {E(it["id"])}</div>
-</div>
-</article></main>
-</body></html>"""
+def _item_html(conn,it):
+    summary,specs=_knowledge(conn,it['id'])
+    photos=_photos(conn,it['id'])
+    gal=''.join(f'<a href="../{E(p)}" target="_blank" rel="noopener"><img src="../{E(p)}" alt="{E(it["name"])}" loading="lazy"></a>' for p in photos) or '<div class="none">Фото уточняется</div>'
+    docs=conn.execute("SELECT url_or_path,title FROM item_manuals WHERE item_id=? ORDER BY rowid",(it['id'],)).fetchall()
+    links=''.join(f'<a href="{E(d["url_or_path"])}" target="_blank" rel="noopener noreferrer">{E(d["title"] or "Документация")}</a>' for d in docs if web_url(d['url_or_path']))
+    pairs=''.join(f'<div class="pair"><div class="k">{E(k)}</div><div class="v">{E(v)}</div></div>' for k,v in specs.items() if v is not None and v!='')
+    description=it['description'] if it['description']!=summary else ''
+    return f'''{_head(it['name']+' · Завхоз','../',summary or it['name'])}
+<header class="top"><div class="row"><a class="back" id="back" href="../index.html">{_CHEVRON}Все компоненты</a></div></header>
+<main id="main"><article class="item"><div class="lead"><span class="badge">{E(CATEGORY_LABELS.get(it['category'],it['category']))}</span><h1>{E(it['name'])}</h1>
+<p class="prose">{E(summary)}</p></div><figure class="gallery">{gal}</figure><div class="info">{('<h2 class="sect">Документация</h2><div class="docs">'+links+'</div>') if links else ''}
+{('<h2 class="sect">Характеристики</h2><div class="specs">'+pairs+'</div>') if pairs else ''}
+{('<h2 class="sect">Подробнее</h2><p class="prose">'+E(description)+'</p>') if description else ''}
+<div class="idline">{E(it['id'])}</div></div></article></main></body></html>'''
 
 
-def _404_html() -> str:
-    return f"""{_head("Не найдено · Завхоз", "/zavhoz-web/assets/style.css")}<body>
-<header class="top"><div class="row"><a class="back" href="/zavhoz-web/index.html">{_CHEVRON}Каталог</a></div></header>
-<main><div class="empty-all"><h1>Страница не найдена</h1>
-<p>Такой позиции нет или ссылка устарела.</p>
-<p><a class="back" href="/zavhoz-web/index.html">{_CHEVRON}Вернуться в каталог</a></p></div></main>
-</body></html>"""
+def build(out_dir,repo_dir=None):
+    """Build from a consistent snapshot; only approved referenced photo bytes leave it."""
+    root=Path(repo_dir or os.environ.get('INVENTORY_REPO_DIR',os.getcwd())).resolve()
+    out=Path(out_dir).absolute()
+    if out.is_symlink() or out.resolve()==root or out.resolve() in root.parents:
+        raise ValueError('Output must be separate from private inventory')
+    source=connect()
+    conn=sqlite3.connect(':memory:');conn.row_factory=sqlite3.Row
+    try:
+        source.backup(conn)
+    finally:
+        source.close()
+    try:
+        conn.execute('CREATE TEMP TABLE approved(path TEXT PRIMARY KEY)')
+        items=conn.execute("SELECT * FROM items WHERE public_visible=1 AND status NOT IN ('retired','quarantine','lost') ORDER BY category,name").fetchall()
+        if any(not item_id_valid(it['id']) for it in items):
+            raise ValueError('Unsafe item id')
+        approved={}
+        for r in conn.execute('SELECT * FROM public_assets'):
+            path=Path(r['path']);src=root/path
+            if path.is_absolute() or path.parts[:1]!=('photos',) or '..' in path.parts or src.is_symlink():
+                continue
+            if src.resolve().parent!=(root/'photos').resolve() or not src.is_file():
+                continue
+            if hashlib.sha256(src.read_bytes()).hexdigest()!=r['sha256']:
+                continue
+            approved[r['path']]=src
+            conn.execute('INSERT INTO approved VALUES (?)',(r['path'],))
+        groups={}
+        for it in items:groups.setdefault(it['category'] or 'other',[]).append(it)
+        order=[c for c in CATEGORY_LABELS if c in groups]+[c for c in groups if c not in CATEGORY_LABELS]
+        out.parent.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='.catalog-',dir=out.parent) as stage_name:
+            stage=Path(stage_name)
+            for d in ('assets','photos','item'):(stage/d).mkdir()
+            (stage/'index.html').write_text(_index_html(conn,groups,order,len(items)),encoding='utf-8')
+            (stage/'assets/style.css').write_text(Path(__file__).with_name('catalog.css').read_text(),encoding='utf-8')
+            shutil.copyfile(Path(__file__).with_name('catalog.js'),stage/'assets/catalog.js')
+            needed=set()
+            for it in items:
+                (stage/'item'/f'{it["id"]}.html').write_text(_item_html(conn,it),encoding='utf-8')
+                needed.update(_photos(conn,it['id']))
+            for photo in needed:shutil.copyfile(approved[photo],stage/photo)
+            (stage/'.nojekyll').touch()
+            base=os.environ.get('CATALOG_BASE_PATH','/zavhoz-web/').rstrip('/')+'/'
+            if not base.startswith('/') or any(c in base for c in '<>"\''):
+                raise ValueError('Unsafe base path')
+            (stage/'404.html').write_text(_head('Страница не найдена',base)+f'<main id="main"><h1>Страница не найдена</h1><p><a href="{E(base)}">Вернуться в каталог</a></p></main></body></html>',encoding='utf-8')
+            out.mkdir(parents=True,exist_ok=True)
+            # Complete build first, then replace generated paths. Keep .git/README.
+            for name in ('assets','photos','item','index.html','404.html','.nojekyll'):
+                target=out/name
+                if target.is_symlink():raise ValueError('Symlink output path')
+            for name in ('assets','photos','item','index.html','404.html','.nojekyll'):
+                target=out/name
+                if target.is_dir():shutil.rmtree(target)
+                (stage/name).replace(target)
+        return len(items)
+    finally:
+        conn.close()
 
 
-def build(out_dir: str, repo_dir: str | None = None) -> int:
-    """repo_dir — где лежат photos/ (для копирования). Возвращает число позиций."""
-    conn = connect()
-    items = conn.execute(
-        "SELECT * FROM items WHERE status != 'retired' ORDER BY category, name"
-    ).fetchall()
-    groups: dict = {}
-    for it in items:
-        groups.setdefault(it["category"] or "other", []).append(it)
-    order = [c for c in CATEGORY_LABELS if c in groups] + [c for c in groups if c not in CATEGORY_LABELS]
-
-    os.makedirs(os.path.join(out_dir, "assets"), exist_ok=True)
-    os.makedirs(os.path.join(out_dir, "item"), exist_ok=True)
-    with open(os.path.join(out_dir, "assets", "style.css"), "w", encoding="utf-8") as fh:
-        fh.write(_css())
-    with open(os.path.join(out_dir, "index.html"), "w", encoding="utf-8") as fh:
-        fh.write(_index_html(conn, groups, order, len(items)))
-    with open(os.path.join(out_dir, "404.html"), "w", encoding="utf-8") as fh:
-        fh.write(_404_html())
-    for it in items:
-        with open(os.path.join(out_dir, "item", f'{it["id"]}.html'), "w", encoding="utf-8") as fh:
-            fh.write(_item_html(conn, it))
-
-    # Копируем фото внутрь сайта, чтобы он был самодостаточным.
-    repo_dir = repo_dir or os.environ.get("INVENTORY_REPO_DIR", os.getcwd())
-    src_photos = os.path.join(repo_dir, "photos")
-    dst_photos = os.path.join(out_dir, "photos")
-    if os.path.isdir(src_photos):
-        os.makedirs(dst_photos, exist_ok=True)
-        for f in os.listdir(src_photos):
-            s = os.path.join(src_photos, f)
-            if os.path.isfile(s):
-                shutil.copy2(s, os.path.join(dst_photos, f))
-    open(os.path.join(out_dir, ".nojekyll"), "w").close()
-    return len(items)
-
-
-if __name__ == "__main__":
+if __name__=='__main__':
     import sys
-    out = sys.argv[1] if len(sys.argv) > 1 else "site"
-    n = build(out)
-    print(f"site built: {n} items -> {out}")
+    output=sys.argv[1] if len(sys.argv)>1 else 'site'
+    print(f'site built: {build(output)} items -> {output}')
