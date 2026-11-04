@@ -3,6 +3,27 @@ import os
 import sqlite3
 import re
 from datetime import datetime, timezone
+from functools import wraps
+try:
+    from .safety import quantity, web_url, download_public, image_extension
+except ImportError:
+    from safety import quantity, web_url, download_public, image_extension
+
+def atomic(fn):
+    @wraps(fn)
+    def run(conn, *args, **kwargs):
+        if conn.in_transaction:
+            raise RuntimeError("Незавершённая транзакция")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            result = fn(conn, *args, **kwargs)
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+    return run
+
 
 
 def utc_now() -> str:
@@ -12,7 +33,7 @@ def utc_now() -> str:
 def connect() -> sqlite3.Connection:
     db_path = os.environ.get("INVENTORY_DB", "inventory_bot/inventory.db")
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     with open(os.path.join(os.path.dirname(__file__), "schema.sql"), "r", encoding="utf-8") as fh:
         conn.executescript(fh.read())
@@ -23,6 +44,8 @@ def connect() -> sqlite3.Connection:
 def _migrate(conn) -> None:
     """Add columns missing from tables created by older schema versions."""
     wanted = {
+        "items": [("quantity_basis", "TEXT NOT NULL DEFAULT 'legacy'"), ("public_visible", "INTEGER NOT NULL DEFAULT 1")],
+        "item_knowledge": [("reviewed_at", "TEXT NOT NULL DEFAULT ''")],
         "proposals": [
             ("draft_message_id", "INTEGER NOT NULL DEFAULT 0"),
         ],
@@ -68,6 +91,9 @@ def _yaml_scalar(raw: str):
 
 def seed_projects(conn) -> None:
     # Только первичное наполнение: удалённые пользователем проекты не воскрешаем.
+    if conn.execute("SELECT 1 FROM preferences WHERE key='projects_seeded'").fetchone():
+        return
+    set_preference(conn, "projects_seeded", "1")
     if conn.execute("SELECT COUNT(*) AS c FROM projects").fetchone()["c"]:
         return
     now = utc_now()
@@ -96,6 +122,8 @@ def seed_items_from_yaml(conn, repo_dir: str) -> int:
     path = os.path.join(repo_dir, "items.yaml")
     if not os.path.exists(path):
         return 0
+    if os.environ.get("INVENTORY_ALLOW_LEGACY_SEED") != "1":
+        raise RuntimeError("Восстановите SQLite backup или inventory.json v2. Неполный YAML импорт отключён.")
     items = []
     current = None
     in_items = False
@@ -176,7 +204,7 @@ def list_pending(conn):
 def list_items(conn, limit: int = 80):
     return conn.execute(
         """
-        SELECT id, name, category, status, available_qty, total_qty, unit, location
+        SELECT id, name, category, status, quantity_basis, public_visible, available_qty, total_qty, unit, location
         FROM items
         WHERE status != 'retired'
         ORDER BY category, name
@@ -226,7 +254,7 @@ def inv_new_count(conn) -> int:
     """Positions never verified at all (fresh arrivals)."""
     return conn.execute(
         "SELECT COUNT(*) AS c FROM items WHERE (last_verified_at IS NULL OR last_verified_at = '') "
-        "AND status NOT IN ('retired', 'wishlist', 'in_use', 'lost')"
+        "AND status NOT IN ('retired', 'wishlist', 'in_use', 'lost', 'ordered', 'quarantine')"
     ).fetchone()["c"]
 
 
@@ -301,17 +329,19 @@ def item_projects(conn, item_id: str) -> list:
     return [r["name"] for r in rows]
 
 
+@atomic
 def item_retire(conn, item_id: str) -> None:
     """Consumed/written off: gone for good, cannot be pulled back out of anything."""
     now = utc_now()
+    conn.execute("DELETE FROM item_usage WHERE item_id = ?", (item_id,))
     conn.execute(
         "UPDATE items SET status = 'retired', total_qty = 0, available_qty = 0, "
         "last_verified_at = ?, updated_at = ? WHERE id = ?",
         (now, now, item_id),
     )
-    conn.commit()
 
 
+@atomic
 def item_split_to_project(conn, item_id: str, qty_used: float, project_id: str) -> tuple:
     """Move part of a position into a project as a NEW item (it stays in /list
     under the project and can be pulled back later); the rest stays free.
@@ -321,7 +351,12 @@ def item_split_to_project(conn, item_id: str, qty_used: float, project_id: str) 
         raise ValueError(f"no item {item_id}")
     now = utc_now()
     new_id = next_item_id(conn)
-    remaining = max(0.0, (item["total_qty"] or 0) - qty_used)
+    qty_used = quantity(qty_used, positive=True)
+    if qty_used > item["available_qty"] or item["status"] in ("ordered", "quarantine", "lost", "retired"):
+        raise ValueError("Недостаточно свободных деталей")
+    if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+        raise ValueError("Проект не найден")
+    remaining = item["total_qty"] - qty_used
     conn.execute(
         "INSERT INTO items (id, name, category, status, total_qty, available_qty, unit, location, "
         "notes, description, price_rub, last_verified_at, created_at, updated_at) "
@@ -344,15 +379,21 @@ def item_split_to_project(conn, item_id: str, qty_used: float, project_id: str) 
     )
     conn.execute(
         "UPDATE items SET total_qty = ?, available_qty = ?, last_verified_at = ?, updated_at = ? WHERE id = ?",
-        (remaining, remaining, now, now, item_id),
+        (remaining, item["available_qty"] - qty_used, now, now, item_id),
     )
-    conn.commit()
+    for table, cols in [("item_manuals", "url_or_path,title"), ("item_tags", "tag"),
+                        ("item_knowledge", "summary,specs_json,updated_at,reviewed_at")]:
+        conn.execute(f"INSERT INTO {table} (item_id,{cols}) SELECT ?,{cols} FROM {table} WHERE item_id=?", (new_id,item_id))
+    conn.execute("UPDATE items SET quantity_basis=?, public_visible=? WHERE id=?", (item["quantity_basis"],item["public_visible"],new_id))
     return new_id, remaining
 
 
 def item_apply_enrichment(conn, item_id: str, enr: dict) -> None:
     """Записать обогащение: описание, характеристики (knowledge), офиц. документация (manuals)."""
     import json as _json
+    prior = conn.execute("SELECT reviewed_at FROM item_knowledge WHERE item_id=?", (item_id,)).fetchone()
+    if prior and prior["reviewed_at"]:
+        return  # Reviewed knowledge is not replaced by automatic enrichment.
     now = utc_now()
     if enr.get("description"):
         conn.execute("UPDATE items SET description = ?, updated_at = ? WHERE id = ?",
@@ -367,8 +408,9 @@ def item_apply_enrichment(conn, item_id: str, enr: dict) -> None:
     if docs is None and enr.get("datasheet_url"):  # совместимость со старым форматом
         docs = [{"title": "Datasheet", "url": enr["datasheet_url"]}]
     if docs:
-        conn.execute("DELETE FROM item_manuals WHERE item_id = ?", (item_id,))
         for d in docs:
+            if not web_url(d.get("url", "")):
+                continue
             conn.execute(
                 "INSERT OR IGNORE INTO item_manuals (item_id, url_or_path, title) VALUES (?, ?, ?)",
                 (item_id, d["url"], d.get("title", "")),
@@ -387,28 +429,25 @@ def item_has_only_screenshot(conn, item_id: str) -> bool:
 def item_fetch_photo(conn, item_id: str, image_url: str, repo_dir: str, replace_screenshot: bool = True) -> bool:
     """Скачать нормальное фото товара в repo/photos и привязать. Возвращает True при успехе.
     Если у позиции только скриншот-опознание — заменяем его."""
-    import os, hashlib, urllib.request as _u
-    if not image_url.startswith("http"):
+    import hashlib
+    if not get_item(conn, item_id):
+        raise ValueError("Позиция не найдена")
+    try:
+        data, ctype = download_public(image_url)
+        ext = image_extension(data)
+        if not ctype.startswith("image/"):
+            return False
+    except (ValueError, OSError):
         return False
     photos_dir = os.path.join(repo_dir, "photos")
     os.makedirs(photos_dir, exist_ok=True)
-    ext = ".png" if image_url.lower().split("?")[0].endswith(".png") else ".jpg"
-    fname = f"{item_id}-web-{hashlib.md5(image_url.encode()).hexdigest()[:8]}{ext}"
+    fname = f"{hashlib.sha256(data).hexdigest()}{ext}"
     abs_path = os.path.join(photos_dir, fname)
-    try:
-        req = _u.Request(image_url, headers={"User-Agent": "Mozilla/5.0"})
-        with _u.urlopen(req, timeout=30) as resp:
-            ctype = resp.headers.get("Content-Type", "")
-            data = resp.read()
-        if "image" not in ctype or len(data) < 2000:
-            return False
-        with open(abs_path, "wb") as fh:
-            fh.write(data)
-    except Exception:
-        return False
-    if replace_screenshot and item_has_only_screenshot(conn, item_id):
-        conn.execute("DELETE FROM item_photos WHERE item_id = ?", (item_id,))
-    conn.execute("INSERT OR IGNORE INTO item_photos (item_id, path) VALUES (?, ?)", (item_id, f"photos/{fname}"))
+    with open(abs_path + ".tmp", "wb") as fh:
+        fh.write(data)
+    os.replace(abs_path + ".tmp", abs_path)
+    # Keep source evidence. Newly downloaded images require public review.
+    conn.execute("INSERT OR IGNORE INTO item_photos (item_id,path) VALUES (?,?)", (item_id, f"photos/{fname}"))
     conn.commit()
     return True
 
@@ -429,16 +468,17 @@ def item_set_price(conn, item_id: str, price: float) -> None:
     conn.commit()
 
 
-def item_set_source(conn, item_id: str, url: str, title: str = "") -> None:
-    """Заменить основной источник позиции (один)."""
+def item_set_source(conn, item_id: str, url: str, title: str = "", kind: str = "purchase") -> None:
+    """Добавить источник, сохраняя историю покупки."""
+    if not web_url(url):
+        raise ValueError("Некорректная ссылка")
     import re as _re
     if not title:
         m = _re.search(r"https?://(?:www\.)?([^/]+)", url)
         title = m.group(1) if m else "источник"
-    conn.execute("DELETE FROM item_sources WHERE item_id = ?", (item_id,))
     conn.execute(
-        "INSERT OR IGNORE INTO item_sources (item_id, kind, title, url, notes) VALUES (?, 'purchase', ?, ?, '')",
-        (item_id, title, url),
+        "INSERT OR IGNORE INTO item_sources (item_id, kind, title, url, notes) VALUES (?, ?, ?, ?, '')",
+        (item_id, kind, title, url),
     )
     conn.execute("UPDATE items SET updated_at = ? WHERE id = ?", (utc_now(), item_id))
     conn.commit()
@@ -614,10 +654,13 @@ def inv_mark_qty(conn, item_id: str, new_total: float) -> None:
     A positive count on a lost item means it was found again."""
     row = conn.execute("SELECT total_qty, available_qty, status FROM items WHERE id = ?", (item_id,)).fetchone()
     reserved = max(0.0, (row["total_qty"] or 0) - (row["available_qty"] or 0)) if row else 0.0
-    new_available = max(0.0, new_total - reserved)
+    new_total = quantity(new_total)
+    if not row or new_total < reserved:
+        raise ValueError("Количество меньше уже занятого в проектах")
+    new_available = new_total - reserved
     status_fix = ", status = 'stock'" if (row and row["status"] == "lost" and new_total > 0) else ""
     conn.execute(
-        f"UPDATE items SET total_qty = ?, available_qty = ?{status_fix}, "
+        f"UPDATE items SET total_qty = ?, available_qty = ?{status_fix}, quantity_basis='physical', "
         "last_verified_at = ?, updated_at = ? WHERE id = ?",
         (new_total, new_available, utc_now(), utc_now(), item_id),
     )
@@ -708,36 +751,29 @@ def project_rename(conn, project_id: str, name: str) -> None:
     conn.commit()
 
 
+def _refresh_available(conn, item_id):
+    item=get_item(conn,item_id)
+    if not item or item["status"] in ("retired","lost","ordered","quarantine","wishlist"):
+        return
+    used=conn.execute("SELECT COALESCE(SUM(qty),0) FROM item_usage WHERE item_id=?",(item_id,)).fetchone()[0]
+    status="in_use" if used else ("tool" if item["category"]=="tool" else "stock")
+    conn.execute("UPDATE items SET available_qty=?, status=?, updated_at=? WHERE id=?",
+                 (item["total_qty"]-used,status,utc_now(),item_id))
+
+
+@atomic
 def project_delete(conn, project_id: str) -> int:
-    """Удалить проект; его детали освобождаются на склад. Возвращает число деталей."""
-    now = utc_now()
-    rows = conn.execute("SELECT DISTINCT item_id FROM item_usage WHERE project_id = ?", (project_id,)).fetchall()
-    freed = 0
-    for r in rows:
-        conn.execute("DELETE FROM item_usage WHERE project_id = ? AND item_id = ?", (project_id, r["item_id"]))
-        left = conn.execute("SELECT COUNT(*) AS c FROM item_usage WHERE item_id = ?", (r["item_id"],)).fetchone()["c"]
-        if not left:
-            conn.execute(
-                "UPDATE items SET status = 'stock', available_qty = total_qty, updated_at = ? WHERE id = ?",
-                (now, r["item_id"]),
-            )
-        freed += 1
-    conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-    conn.commit()
-    return freed
+    rows=conn.execute("SELECT DISTINCT item_id FROM item_usage WHERE project_id=?",(project_id,)).fetchall()
+    conn.execute("DELETE FROM item_usage WHERE project_id=?",(project_id,))
+    for row in rows:_refresh_available(conn,row["item_id"])
+    conn.execute("DELETE FROM projects WHERE id=?",(project_id,))
+    return len(rows)
 
 
+@atomic
 def project_remove_item(conn, project_id: str, item_id: str) -> None:
-    """Вынуть деталь из проекта: позиция становится свободной."""
-    now = utc_now()
-    conn.execute("DELETE FROM item_usage WHERE project_id = ? AND item_id = ?", (project_id, item_id))
-    left = conn.execute("SELECT COUNT(*) AS c FROM item_usage WHERE item_id = ?", (item_id,)).fetchone()["c"]
-    if not left:
-        conn.execute(
-            "UPDATE items SET status = 'stock', available_qty = total_qty, updated_at = ? WHERE id = ?",
-            (now, item_id),
-        )
-    conn.commit()
+    conn.execute("DELETE FROM item_usage WHERE project_id=? AND item_id=?",(project_id,item_id))
+    _refresh_available(conn,item_id)
 
 
 def project_set_desc(conn, project_id: str, text: str) -> None:
@@ -757,13 +793,18 @@ def project_by_desc_msg(conn, msg_id: int):
     return conn.execute("SELECT * FROM projects WHERE desc_msg_id = ?", (msg_id,)).fetchone()
 
 
+@atomic
 def item_set_in_project(conn, item_id: str, project_id: str) -> None:
     """Mark the whole position as living inside a project: usage record,
     status in_use, no free stock, verified now."""
     now = utc_now()
     row = conn.execute("SELECT total_qty FROM items WHERE id = ?", (item_id,)).fetchone()
-    qty = row["total_qty"] if row else 1
-    conn.execute("DELETE FROM item_usage WHERE item_id = ? AND project_id = ?", (item_id, project_id))
+    if not row or not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+        raise ValueError("Позиция или проект не найдены")
+    qty = quantity(row["total_qty"], positive=True)
+    if get_item(conn, item_id)["status"] in ("ordered", "quarantine", "lost", "retired"):
+        raise ValueError("Позиция недоступна для проекта")
+    conn.execute("DELETE FROM item_usage WHERE item_id = ?", (item_id,))
     conn.execute(
         "INSERT INTO item_usage (item_id, project_id, qty, role, since, removable) "
         "VALUES (?, ?, ?, '', ?, 1)",
@@ -773,7 +814,6 @@ def item_set_in_project(conn, item_id: str, project_id: str) -> None:
         "UPDATE items SET status = 'in_use', available_qty = 0, last_verified_at = ?, updated_at = ? WHERE id = ?",
         (now, now, item_id),
     )
-    conn.commit()
 
 
 def item_set_photo(conn, item_id: str, path: str) -> None:
@@ -791,13 +831,14 @@ def item_add_photo(conn, item_id: str, path: str) -> None:
     conn.commit()
 
 
+@atomic
 def inv_mark_lost(conn, item_id: str) -> None:
+    conn.execute("DELETE FROM item_usage WHERE item_id = ?", (item_id,))
     conn.execute(
         "UPDATE items SET total_qty = 0, available_qty = 0, status = 'lost', "
         "last_verified_at = ?, updated_at = ? WHERE id = ?",
         (utc_now(), utc_now(), item_id),
     )
-    conn.commit()
 
 
 def list_items_with_sources(conn, limit: int = 500):
@@ -805,7 +846,7 @@ def list_items_with_sources(conn, limit: int = 500):
     return conn.execute(
         """
         SELECT
-            i.id, i.name, i.category, i.status, i.available_qty, i.total_qty,
+            i.id, i.name, i.category, i.status, i.quantity_basis, i.public_visible, i.available_qty, i.total_qty,
             i.unit, i.location,
             (SELECT s.url FROM item_sources s
              WHERE s.item_id = i.id
@@ -830,14 +871,14 @@ def list_projects(conn):
     return conn.execute("SELECT * FROM projects ORDER BY id").fetchall()
 
 
-def get_proposal(conn, proposal_id: int):
-    return conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
+def get_proposal(conn, proposal_id: int, user_id=None):
+    return conn.execute("SELECT * FROM proposals WHERE id=? AND (? IS NULL OR telegram_user_id=?)", (proposal_id,user_id,user_id)).fetchone()
 
 
-def discard_proposal(conn, proposal_id: int) -> bool:
+def discard_proposal(conn, proposal_id: int, user_id=None) -> bool:
     cur = conn.execute(
-        "UPDATE proposals SET status = 'discarded' WHERE id = ? AND status = 'pending'",
-        (proposal_id,),
+        "UPDATE proposals SET status = 'discarded' WHERE id = ? AND status = 'pending' AND (? IS NULL OR telegram_user_id=?)",
+        (proposal_id,user_id,user_id),
     )
     conn.commit()
     return cur.rowcount == 1
@@ -892,11 +933,14 @@ def next_item_id(conn) -> str:
     return f"hw-{datetime.now(timezone.utc).year}-{max_num + 1:03d}"
 
 
-def apply_proposal(conn, proposal_id: int) -> dict:
+@atomic
+def apply_proposal(conn, proposal_id: int, user_id=None) -> dict:
     row = get_proposal(conn, proposal_id)
     if not row or row["status"] != "pending":
         raise ValueError("proposal is not pending")
 
+    if user_id is not None and row["telegram_user_id"] != user_id:
+        raise ValueError("Это черновик другого пользователя")
     proposal = json.loads(row["proposal_json"])
     photo_paths = json.loads(row["photo_paths_json"])
     applied = []
@@ -904,6 +948,8 @@ def apply_proposal(conn, proposal_id: int) -> dict:
 
     for op in proposal.get("operations", []):
         op_name = op.get("op")
+        if op_name not in {"ask_user", "add_item", "update_item", "adjust_qty", "mark_used", "add_photo"}:
+            raise ValueError("Неизвестная операция черновика")
         if op_name == "ask_user":
             applied.append({"op": op_name, "result": "skipped"})
             continue
@@ -911,6 +957,9 @@ def apply_proposal(conn, proposal_id: int) -> dict:
         item_id = op.get("item_id") or ""
         name = op.get("name") or "Unnamed item"
         qty = float(op.get("qty") or 0)
+        quantity(abs(qty))
+        if op_name != "adjust_qty":
+            quantity(qty)
         unit = op.get("unit") or "pcs"
         location = op.get("location") or "unsorted"
         category = op.get("category") or "unknown"
@@ -921,11 +970,12 @@ def apply_proposal(conn, proposal_id: int) -> dict:
         knowledge_summary = op.get("knowledge_summary") or ""
 
         if op_name == "add_item":
+            if status not in {"stock","ordered","quarantine","reserved","in_use","consumable","tool","wishlist","lost","retired"}:
+                raise ValueError("Неизвестный статус позиции")
             # id назначаем сами: модель иногда выдумывает item_id, который может
             # совпасть с существующим — тогда новая позиция молча потерялась бы.
-            if not item_id or get_item(conn, item_id):
-                item_id = next_item_id(conn)
-            price_rub = float(op.get("price_rub") or 0)
+            item_id = next_item_id(conn)
+            price_rub = quantity(op.get("price_rub") or 0)
             conn.execute(
                 """
                 INSERT INTO items (
@@ -933,12 +983,12 @@ def apply_proposal(conn, proposal_id: int) -> dict:
                   location, notes, price_rub, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (item_id, name, category, status, qty, qty if status != "ordered" else 0, unit, location, notes, price_rub, now, now),
+                (item_id, name, category, status, qty, qty if status not in ("ordered", "quarantine", "wishlist", "retired", "lost") else 0, unit, location, notes, price_rub, now, now),
             )
             for path in photo_paths:
                 conn.execute("INSERT OR IGNORE INTO item_photos (item_id, path) VALUES (?, ?)", (item_id, path))
             image_url = op.get("image_url") or ""
-            if image_url and not photo_paths:
+            if web_url(image_url) and not photo_paths:
                 conn.execute("INSERT OR IGNORE INTO item_photos (item_id, path) VALUES (?, ?)", (item_id, image_url))
             if source_url:
                 conn.execute(
@@ -961,8 +1011,7 @@ def apply_proposal(conn, proposal_id: int) -> dict:
 
         elif op_name == "update_item":
             if not item_id or not get_item(conn, item_id):
-                applied.append({"op": op_name, "result": "item not found", "item_id": item_id})
-                continue
+                raise ValueError("Позиция не найдена")
             sets, vals = [], []
             cur = get_item(conn, item_id)
             if name and name != cur["name"] and name != "Unnamed item":
@@ -972,7 +1021,7 @@ def apply_proposal(conn, proposal_id: int) -> dict:
             if op.get("description"):
                 sets.append("description = ?"); vals.append(op["description"])
             if op.get("status") and status != cur["status"]:
-                sets.append("status = ?"); vals.append(status)
+                raise ValueError("Меняйте наличие отдельной командой инвентаризации")
             if notes:
                 # Заметку дописываем, а не перетираем.
                 stamp = now[:10]
@@ -986,8 +1035,7 @@ def apply_proposal(conn, proposal_id: int) -> dict:
 
         elif op_name == "adjust_qty":
             if not item_id or not get_item(conn, item_id):
-                applied.append({"op": op_name, "result": "item not found", "item_id": item_id})
-                continue
+                raise ValueError("Позиция не найдена")
             conn.execute(
                 """
                 UPDATE items
@@ -1002,9 +1050,13 @@ def apply_proposal(conn, proposal_id: int) -> dict:
 
         elif op_name == "mark_used":
             if not item_id or not get_item(conn, item_id):
-                applied.append({"op": op_name, "result": "item not found", "item_id": item_id})
-                continue
+                raise ValueError("Позиция не найдена")
             project_id = op.get("project_id") or "project-ideas-lab"
+            quantity(qty, positive=True)
+            if qty > get_item(conn, item_id)["available_qty"]:
+                raise ValueError("Недостаточно свободных деталей")
+            if not conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+                raise ValueError("Проект не найден")
             conn.execute(
                 """
                 INSERT INTO item_usage (item_id, project_id, qty, role, since, removable)
@@ -1026,5 +1078,4 @@ def apply_proposal(conn, proposal_id: int) -> dict:
             applied.append({"op": op_name, "item_id": item_id, "photos": len(photo_paths)})
 
     conn.execute("UPDATE proposals SET status = 'applied', applied_at = ? WHERE id = ?", (now, proposal_id))
-    conn.commit()
     return {"proposal_id": proposal_id, "applied": applied}

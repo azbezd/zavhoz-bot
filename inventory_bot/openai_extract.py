@@ -24,10 +24,10 @@ If screenshots contain seller/order/product text, infer purchase status:
 When possible, research or cite the purchase/reference source and summarize practical hardware knowledge:
 pinout/manual keywords, voltage, interface, common use, caveats.
 If web research is unavailable or uncertain, leave source_url empty and say what needs checking in notes.
-Marketplace links (ozon, wildberries, aliexpress, avito) rot quickly and listings are imprecise:
-use such a link only to extract the item name, price and photo at add time, but DO NOT store it
-in source_url — leave source_url empty unless it is a stable vendor/manufacturer page
-(amperkot.ru, chipdip.ru, datasheet sites). Price is optional: use 0 when unknown, never guess.
+Preserve the exact user-provided purchase URL as source_url, including marketplaces.
+Store provenance even when the link may expire. Never replace a purchase URL with a
+similar product found online. Label uncertain reference sources in source_notes.
+Price is optional: use 0 when unknown, never guess.
 category MUST be exactly one of these slugs (never invent new ones, never use Russian words):
 computer, microcontroller, module, sensor, emitter, semiconductor, passive, connector, wire,
 proto, network, power, mechanical, tool. Resistors/capacitors/fuses -> passive.
@@ -36,7 +36,7 @@ proto, network, power, mechanical, tool. Resistors/capacitors/fuses -> passive.
 Если сообщение МЕНЯЕТ уже существующую позицию (сломал/модифицировал/переименовать/уточнить описание/
 изменить количество/поставил в проект/потерял) — НЕ создавай новую через add_item.
 Найди подходящую позицию в списке и используй её item_id:
-- update_item: изменить название/категорию/описание/заметку/статус существующей позиции
+- update_item: изменить название/категорию/описание/заметку существующей позиции
   (например «плата теперь без дисплея» → update_item с новым name и description). Заполни item_id и
   только меняющиеся поля (name — новое полное название; description — новое описание; notes — заметка).
 - adjust_qty: только изменить количество существующей позиции.
@@ -55,7 +55,7 @@ add_item — ТОЛЬКО для действительно новых пози�
 
 Supported operations:
 - add_item: add a new owned item or wishlist item
-- update_item: change name/category/description/notes/status of an EXISTING item (by item_id)
+- update_item: change name/category/description/notes of an EXISTING item (by item_id)
 - adjust_qty: increase/decrease quantity of an existing item
 - mark_used: reserve or use an item in a project
 - add_photo: attach a photo to an item
@@ -213,8 +213,7 @@ def extract_device_layout(text: str, project_names: list) -> list:
         with urllib.request.urlopen(req, timeout=90) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"OpenAI HTTP {exc.code}: {body}") from exc
+        raise RuntimeError(f"OpenAI HTTP {exc.code}") from None
     for output in raw.get("output", []):
         for part in output.get("content", []):
             if part.get("type") == "output_text":
@@ -351,9 +350,15 @@ def describe_photo(photo_path: str, question: str) -> str:
 def scrape_amperkot(url: str) -> dict:
     """Снять имя/цену/фото с карточки amperkot.ru без участия модели."""
     import re, html as _html
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=25) as resp:
-        page = resp.read().decode("utf-8", "replace")
+    from urllib.parse import urlsplit
+    try:
+        from .safety import download_public
+    except ImportError:
+        from safety import download_public
+    if urlsplit(url).hostname not in ("amperkot.ru", "www.amperkot.ru"):
+        raise ValueError("Ожидается карточка amperkot.ru")
+    data, _ = download_public(url, limit=2_000_000)
+    page = data.decode("utf-8", "replace")
     name = ""
     m = re.search(r"<title>(.*?)</title>", page, re.S)
     if m:
@@ -449,8 +454,7 @@ def extract_inventory_proposal(text: str, photo_paths: list[str], inventory_cont
         with urllib.request.urlopen(req, timeout=90) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"OpenAI HTTP {exc.code}: {body}") from exc
+        raise RuntimeError(f"OpenAI HTTP {exc.code}") from None
 
     for output in raw.get("output", []):
         for part in output.get("content", []):

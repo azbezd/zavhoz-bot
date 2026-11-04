@@ -128,3 +128,39 @@ CREATE TABLE IF NOT EXISTS preferences (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+-- Public files are opt-in and bound to reviewed bytes, not only a filename.
+CREATE TABLE IF NOT EXISTS public_assets (
+  path TEXT PRIMARY KEY,
+  sha256 TEXT NOT NULL,
+  reviewed_at TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS purchase_events (
+  event_key TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL REFERENCES items(id),
+  source_url TEXT NOT NULL,
+  sku TEXT NOT NULL,
+  received_date TEXT NOT NULL,
+  packages REAL NOT NULL,
+  pack_size REAL NOT NULL,
+  qty REAL NOT NULL,
+  state TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  recorded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS processed_updates (
+  update_id INTEGER PRIMARY KEY,
+  state TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS valid_item_insert BEFORE INSERT ON items
+WHEN NEW.total_qty < 0 OR NEW.total_qty > 1e12 OR NEW.available_qty < 0
+ OR NEW.available_qty > NEW.total_qty OR NEW.price_rub < 0 OR NEW.price_rub > 1e12
+ OR (NEW.status IN ('ordered','wishlist','quarantine','lost','retired') AND NEW.available_qty != 0)
+BEGIN SELECT RAISE(ABORT, 'Некорректное количество или наличие'); END;
+CREATE TRIGGER IF NOT EXISTS valid_item_update BEFORE UPDATE ON items
+WHEN NEW.total_qty < 0 OR NEW.total_qty > 1e12 OR NEW.available_qty < 0
+ OR NEW.available_qty > NEW.total_qty OR NEW.price_rub < 0 OR NEW.price_rub > 1e12
+ OR (NEW.status IN ('ordered','wishlist','quarantine','lost','retired') AND NEW.available_qty != 0)
+BEGIN SELECT RAISE(ABORT, 'Некорректное количество или наличие'); END;
